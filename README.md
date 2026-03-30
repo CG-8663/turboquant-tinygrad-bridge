@@ -175,6 +175,10 @@ The simplest and most immediate configuration. One Mac, one eGPU, one TB5 cable.
 
 **Best for:** Individual researchers, small teams, privacy-sensitive workloads, model experimentation at 405B scale.
 
+**Detailed design:**
+- [RFC: Double-Buffer KV Bridge](docs/RFC-double-buffer-kv-bridge.md) -- compressed KV streaming architecture, wire format, ring buffer, implementation, test strategy
+- [RFC: Double-Buffer KV Bridge (PDF)](docs/RFC-double-buffer-kv-bridge.pdf) -- whitepaper-formatted version with cover page and clickable TOC
+
 ### Approach 2: Multi-Cluster (exo + RDMA + eGPU)
 
 The same compressed KV bridge scales to a multi-node cluster by adding RDMA-connected Mac nodes via [exo](https://github.com/exo-explore/exo). Each node can optionally attach its own eGPU.
@@ -221,6 +225,10 @@ The same compressed KV bridge scales to a multi-node cluster by adding RDMA-conn
 - exo's Spark integration (in progress by Alex Cheema) will handle cluster-level orchestration
 
 **Best for:** Research labs, teams running multiple large models, production-adjacent inference, scaling beyond 400 GB.
+
+**Detailed design:**
+- [RFC: Metal-CUDA KV Bridge](docs/RFC-metal-cuda-kv-bridge.md) -- hardware topology, three-node layer assignment, RDMA data flow, performance projections, exo integration points
+- [RFC: Double-Buffer KV Bridge](docs/RFC-double-buffer-kv-bridge.md) -- the compressed KV streaming bridge that underpins both approaches
 
 ### How the Approaches Connect
 
