@@ -58,13 +58,45 @@ The RTX PRO 6000 uses the GB202 die (same as RTX 5090), which tinygrad already s
 
 This setup puts 192 GB of compute memory on a single desk, spanning two fundamentally different memory architectures. The bridge makes them work as one.
 
-### Why Not Just Use One Device?
+### They Do Different Jobs: Stop Comparing, Start Combining
 
-A single M3 Ultra (96 GB) can run 70B models comfortably. But 405B models (224 GB at Q4_K_M) require more memory than any single consumer device offers. By bridging Metal and CUDA:
+The "Mac vs NVIDIA" debate misses the point entirely. These architectures are not competing -- they are complementary, and confusing one for the other leads to bad purchasing decisions and wasted hardware.
+
+**NVIDIA excels at raw compute density.** The RTX PRO 6000 Blackwell has 24,064 CUDA cores, 1,792 GB/s memory bandwidth, and a mature tensor core pipeline optimised for matrix multiplication throughput. For batch inference, training, and compute-bound workloads, nothing in the consumer/prosumer space touches it. This is a number-crunching machine.
+
+**Apple Silicon excels at memory capacity and serving.** The M3 Ultra's 96 GB of unified memory with 819 GB/s bandwidth -- accessible to both CPU and GPU with zero-copy -- makes it ideal for hosting large models, managing KV cache for concurrent sessions, and serving long-context workloads where the bottleneck is memory, not FLOPs. The M-series chips are serving machines.
+
+**Neither replaces the other:**
+
+| Capability | Apple M3 Ultra | RTX PRO 6000 Blackwell |
+|-----------|---------------|----------------------|
+| Memory capacity | 96 GB unified | 96 GB GDDR7 |
+| Memory bandwidth | 819 GB/s | 1,792 GB/s |
+| Compute (raw FLOPs) | Moderate | Very high |
+| Power efficiency | Excellent (~60W) | High TDP (~300W) |
+| Concurrent session serving | Strong (unified memory) | Limited (VRAM contention) |
+| Long-context KV management | Native (large unified pool) | Constrained by VRAM |
+| Batch throughput | Moderate | Excellent |
+| Driver/OS requirements | None (Metal native) | None (tinygrad direct) |
+
+When you split inference across both:
+- **The Mac handles what it's good at:** hosting the model, managing sessions, serving the KV cache for long-context workloads, running the embedding layers and attention heads that benefit from unified memory
+- **The NVIDIA GPU handles what it's good at:** raw matrix multiplication on the compute-heavy layers, high-throughput decode, parallel batch processing
+
+The bridge doesn't make one device pretend to be the other. It lets each do its job and coordinates the handoff via compressed KV streaming.
+
+### Why This Matters: Self-Sovereign Inference
+
+By combining both architectures on a single desk:
 
 - **192 GB combined pool** -- enough for 405B Q4_K_M with headroom
 - **Extends M3 Ultra into M5 territory** -- matching projected M5 Ultra memory capacity (~200 GB) today, on current hardware
-- **No cloud, no data egress** -- sovereign inference for sensitive workloads
+- **No cloud dependency** -- your models, your data, your hardware. No API calls, no rate limits, no vendor lock-in
+- **Intellectual property protection** -- proprietary models, fine-tuned weights, and sensitive prompts never leave your physical premises. No third-party inference provider sees your data. This matters for legal, medical, financial, and defence applications where data sovereignty is non-negotiable
+- **No data egress** -- zero network exposure during inference. The TB5 link between Mac and eGPU is a local PCIe bus, not a network connection. There is no attack surface beyond physical access to the hardware
+- **Cost structure** -- one-time hardware purchase vs recurring cloud inference costs. At scale, local inference pays for itself within months
+
+This is not about Mac vs NVIDIA. It's about building a **complete, self-contained inference unit** that combines the best of both architectures and keeps everything under your physical control.
 
 ## Architecture: Double-Buffer Compressed KV Streaming
 
