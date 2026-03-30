@@ -109,6 +109,99 @@ From TheTom/turboquant_plus benchmarks (M5 Max 128GB, Metal):
 
 Needle-In-A-Haystack retrieval: 100% accuracy through 32K context for both turbo3 and turbo4.
 
+## Two Approaches: Single Bridge and Multi-Cluster
+
+This project defines two deployment architectures that share the same compressed KV wire format but operate at different scales.
+
+### Approach 1: Single Bridge (M3 Ultra + eGPU)
+
+The simplest and most immediate configuration. One Mac, one eGPU, one TB5 cable.
+
+```
+  Mac M3 Ultra (96 GB)              Razer Core X V2
+  +------------------+              +------------------+
+  | Metal / MLX      |  TB5 PCIe   | RTX PRO 6000     |
+  | Layers 0 -> M    |<----------->| Layers M -> N    |
+  | KV: turbo3/4     |  ~6 GB/s    | KV: turbo3/4     |
+  | (host + bridge)  |             | tinygrad direct   |
+  +------------------+              +------------------+
+        192 GB combined · 2 backends · 1 link
+```
+
+**How it works:**
+- Layers are split proportionally by memory: M3 Ultra takes ~50% (layers 0-39 for 80-layer 70B), RTX PRO 6000 takes ~50% (layers 40-79)
+- During inference, only hidden state activations (16 KB/token) cross the TB5 link per decode step -- negligible latency
+- For KV cache migration (rebalancing, prefill handoff), the double-buffer pipeline streams compressed KV layer-by-layer over TB5
+- The M3 Ultra runs the bridge coordinator: compress on Metal, DMA stripped blocks, decompress on CUDA
+- No network, no cluster orchestration, no drivers -- just two devices on one desk
+
+**What it gets you:**
+- 192 GB pool -- run 405B Q4_K_M locally
+- M5 Ultra-class memory capacity on current M3 hardware
+- Sovereign inference: no cloud, no data egress
+- Single point of failure (TB5 link), simple recovery (fall back to Metal-only)
+
+**Best for:** Individual researchers, small teams, privacy-sensitive workloads, model experimentation at 405B scale.
+
+### Approach 2: Multi-Cluster (exo + RDMA + eGPU)
+
+The same compressed KV bridge scales to a multi-node cluster by adding RDMA-connected Mac nodes via [exo](https://github.com/exo-explore/exo). Each node can optionally attach its own eGPU.
+
+```
+  +------------------+   RDMA / MLX Jaccl   +------------------+
+  | Mac M3 Ultra     |   (~10 GB/s, TB5)    | Mac M1 Max       |
+  | 96 GB · Metal    |<------------------->| 32 GB · Metal    |
+  | Layers 0 -> A    |                      | Layers A -> B    |
+  | + eGPU bridge    |                      | (or + own eGPU)  |
+  +--------+---------+                      +------------------+
+           |
+           | TB5 PCIe (~6 GB/s)
+           |
+  +--------+---------+
+  | RTX PRO 6000     |
+  | 96 GB · CUDA     |
+  | Layers B -> N    |
+  | tinygrad direct  |
+  +------------------+
+
+  Total: 224+ GB · 3+ nodes · 2 link types · 2+ backends
+```
+
+**How it works:**
+- exo manages the cluster topology: node discovery, layer assignment, inference orchestration
+- RDMA links (MLX Jaccl over TB5) handle Mac-to-Mac hidden state transfer at ~10 GB/s with ~5 us RTT
+- The TurboQuant bridge handles Metal-to-CUDA KV streaming within each host that has an eGPU
+- Both link types benefit from compression: RDMA KV migration uses turbo3 (12 ms vs 64 ms for 20 layers at 32K context), PCIe eGPU uses the double-buffer pipeline
+- Layer assignment is proportional to memory across all nodes: a 3-node setup with 96+32+96=224 GB can run 405B Q4_K_M
+
+**The key insight for multi-cluster:** the compressed wire format is the same regardless of transport. Whether KV travels over RDMA between two Macs or over PCIe to an eGPU, it's the same stripped turbo3/turbo4 blocks. The bridge code doesn't care about the link -- it just produces and consumes compressed bytes.
+
+**What it gets you:**
+- 224+ GB pool across heterogeneous nodes
+- Linear memory scaling: add more Macs or eGPUs to grow the pool
+- Each node contributes proportional compute -- no idle hardware
+- Mix of link types (RDMA + PCIe) handled transparently by the same wire format
+
+**Scaling further:**
+- Add more Mac nodes via RDMA for memory + Metal compute
+- Add more eGPUs (one per TB5 port) for CUDA compute density
+- Each eGPU bridge is independent -- no cross-eGPU coordination needed
+- exo's Spark integration (in progress by Alex Cheema) will handle cluster-level orchestration
+
+**Best for:** Research labs, teams running multiple large models, production-adjacent inference, scaling beyond 400 GB.
+
+### How the Approaches Connect
+
+Approach 1 is a subset of Approach 2. The single bridge is the building block:
+
+1. **Build and validate the single bridge first** (this project's current scope)
+2. **Plug it into exo** when Spark integration lands -- the bridge becomes one node in a larger topology
+3. **Scale by adding nodes** -- each with its own optional eGPU bridge
+
+The compressed wire format, ring buffer, and stream coordinator are identical in both approaches. The only difference is who calls `stream_kv_migration`: in Approach 1 it's the local host; in Approach 2 it's exo's cluster orchestrator.
+
+---
+
 ## Project Status
 
 **Phase: Pre-hardware validation**
