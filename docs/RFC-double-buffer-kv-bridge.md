@@ -236,10 +236,12 @@ turbo4 blocks are already compact — no stripping needed.
 
 ```
 ┌──────────────────────────────────────────────┐
-│ Layer Header (16 bytes)                       │
+│ Layer Header (24 bytes)                       │
 │   layer_idx:    uint32                        │
 │   seq_len:      uint32                        │
 │   n_heads:      uint32                        │
+│   head_dim:     uint32                        │
+│   block_count:  uint32                        │
 │   flags:        uint32  (K=0x1, V=0x2, KV=0x3)│
 ├──────────────────────────────────────────────┤
 │ Compressed K cache (stripped turbo blocks)     │
@@ -374,7 +376,7 @@ from typing import Tuple
 from turboquant.kv_cache import KVCacheCompressor
 import numpy as np
 
-HEADER_FMT = "<IIII"  # layer_idx, seq_len, n_heads, flags
+HEADER_FMT = "<IIIIII"  # layer_idx, seq_len, n_heads, head_dim, block_count, flags
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
 FLAG_KV = 0x3
 
@@ -458,7 +460,8 @@ class KVStreamCoordinator:
         """Serialize CompressedKVCache to stripped wire format."""
         header = struct.pack(HEADER_FMT,
                              layer_idx, compressed.seq_len,
-                             compressed.num_heads, FLAG_KV)
+                             compressed.num_heads, compressed.head_dim,
+                             compressed.block_count, FLAG_KV)
         # Serialize compressed arrays — strip GPU padding
         k_bytes = self._serialize_compressed_vectors(compressed.k_compressed[0])
         v_bytes = self._serialize_v_data(compressed.v_indices[0], compressed.v_norms[0])
@@ -466,7 +469,7 @@ class KVStreamCoordinator:
 
     def _from_wire(self, data: bytes):
         """Deserialize stripped wire format."""
-        layer_idx, seq_len, n_heads, flags = struct.unpack(HEADER_FMT, data[:HEADER_SIZE])
+        layer_idx, seq_len, n_heads, head_dim, block_count, flags = struct.unpack(HEADER_FMT, data[:HEADER_SIZE])
         k_len, v_len = struct.unpack("<II", data[HEADER_SIZE:HEADER_SIZE+8])
         offset = HEADER_SIZE + 8
         k_data = data[offset:offset+k_len]
@@ -664,6 +667,19 @@ wire header and reject mismatches at connection time.
 | S0.3 | turbo3/turbo4 compress/decompress on Metal (M3 Ultra) | Correct round-trip, measure latency per layer | Compress timing |
 | S0.4 | turbo3/turbo4 compress/decompress on CUDA (RTX PRO 6000) | Correct round-trip, measure latency per layer | Decompress timing |
 | S0.5 | Codebook consistency | Lloyd-Max centroids from Python `codebook.py` at d=128 match C implementation centroids in Metal and CUDA kernels | Cross-backend correctness |
+| S0.6 | Thermal sustained load | RTX PRO 6000 at 300W in Razer Core X V2: 5-min sustained DMA + compute at full pipeline rate. GPU junction temp must stay <83°C with no clock reduction. | Performance model stability |
+
+**S0.6 context:** Real-world RTX 6000 Pro Ada testing (themarkymark, Waivio 2026) validates
+300W as the optimal operating point: 95.4% throughput retained vs 600W, +44% tokens/watt
+efficiency, stable power draw at 816W system (dual-GPU server). The native 300W Blackwell
+part (GB202, TSMC N4P, GDDR7) is expected to match or exceed Ada efficiency at this power
+level. **Do not under-power below 300W** — empirically shown to reduce efficiency (250W
+draws higher peak spikes at 862W vs 821W and delivers only 84% throughput).
+
+The remaining risk is eGPU enclosure airflow. A server chassis has proper cooling
+infrastructure; the Razer Core X V2 is enclosed with limited airflow. S0.6 validates that
+300W sustained in this enclosure does not create a thermal pocket. If junction exceeds 90°C,
+enclosure cooling modifications are required before proceeding.
 
 ### 7.2 Layer 1 — Double-Buffer Correctness
 
@@ -722,10 +738,10 @@ wire header and reject mismatches at connection time.
 
 ## 9. Open Questions
 
-1. **Wire deserialization implementation** — The `_reconstruct_compressed` method in §4.3
-   needs to reshape raw bytes back into `CompressedKVCache` dataclass structure. This
-   requires knowing the exact byte layout per head, which varies with seq_len and head_dim.
-   Needs a serialization spec that encodes array shapes alongside data.
+1. **~~Wire deserialization implementation~~** — **RESOLVED (2026-04-01).** Wire header
+   expanded from 16 to 24 bytes: added `head_dim` (uint32) and `block_count` (uint32).
+   Consumer can now reshape flat byte buffer into per-head compressed vectors without
+   out-of-band metadata. `_reconstruct_compressed` implementation unblocked.
 
 2. **turbo3 compress latency on Metal** — The ~1.2 ms/layer estimate is extrapolated from
    CPU benchmarks. Metal compute shader performance (via `kernel_set_rows_turbo3`) may
@@ -733,7 +749,8 @@ wire header and reject mismatches at connection time.
 
 3. **Ring buffer memory pinning** — For optimal DMA throughput, ring buffer slots should
    use pinned (page-locked) memory. MLX handles this automatically for unified memory;
-   tinygrad's allocator may need explicit pinning for GDDR7 staging buffers.
+   tinygrad's allocator may need explicit pinning for GDDR7 staging buffers via
+   `BufferSpec(host=True)` or direct `cuMemHostAlloc`.
 
 4. **Prefill split** — Can prompt processing (prefill) be split across backends using the
    same streaming mechanism? Prefill is compute-bound with different DMA/compute overlap
@@ -746,6 +763,25 @@ wire header and reject mismatches at connection time.
 6. **Sparse V dequant integration** — turboquant_plus implements sparse V dequant (skip
    positions where softmax < 1e-6) for +22.8% decode speedup. Can this be applied at the
    bridge level, or only within a single backend?
+
+7. **Transfer path architecture (NEW, 2026-04-01)** — tinygrad's `_transfer()` method only
+   works within the same device family (Metal→Metal or NV→NV). Cross-backend Metal→NV falls
+   back to CPU-mediated `BufferCopy` (`copyin`/`copyout` pair). The "NV vs CUDA backend"
+   framing is a red herring — neither supports cross-family P2P.
+
+   **The real decision:** (a) Work within tinygrad's `BufferCopy` with optimised pinned
+   staging buffers, or (b) bypass tinygrad's transfer layer entirely and manage
+   Metal→host→CUDA DMA directly. Option (a) stays within tinygrad's abstractions but has
+   limited control over pinning and buffer alignment. Option (b) gives full control over
+   ring buffer memory layout but creates a maintenance surface outside tinygrad. This
+   decision must be made before integration test design — it determines the entire data
+   path under test.
+
+8. **Thermal validation in eGPU enclosure (NEW, 2026-04-01)** — Added Sprint 0 gate S0.6.
+   Real-world RTX 6000 Pro Ada testing (themarkymark, Waivio 2026) validates 300W as
+   optimal: 95.4% throughput, +44% tok/W efficiency. Native Blackwell 300W expected to
+   match or exceed. Remaining risk: Razer Core X V2 airflow under sustained streaming load.
+   Do NOT under-power below 300W — empirically worse (higher peak spikes, lower efficiency).
 
 ---
 
@@ -760,6 +796,7 @@ wire header and reject mismatches at connection time.
 - turboquant-recommendations.md: turboquant_plus/docs/turboquant-recommendations.md (model-specific guidance)
 - PARALLAX heterogeneous inference: https://gradient.network/parallax.pdf
 - exo-explore/exo: https://github.com/exo-explore/exo (future integration, pending Spark)
+- RTX 6000 Pro power efficiency: themarkymark (Waivio, 2026) — 300W cap on 600W Ada cards: 95.4% throughput, +44% tok/W, validates 300W operating point
 
 ---
 
