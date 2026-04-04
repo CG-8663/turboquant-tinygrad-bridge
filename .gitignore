@@ -5,10 +5,9 @@ turboquant_plus/
 
 # BMAD internal config
 _bmad/
-_bmad-output/
 .claude/
 
-# Design artifacts (internal working docs)
+# Design artifacts (empty placeholder dirs)
 design-artifacts/
 
 # OS
