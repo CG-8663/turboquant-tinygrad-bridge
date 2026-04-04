@@ -2,6 +2,10 @@
 
 **Compressed KV cache as a cross-backend wire format for Metal + CUDA split inference**
 
+> **Status: Work in Progress -- RFC stage, seeking community input**
+>
+> This project is in the design and validation phase. The RFCs and architecture are published here for public review. If you're running a Mac + NVIDIA eGPU setup (or planning one), we want your input -- hardware configurations, bandwidth measurements, use cases, pain points. See [How to Contribute](#how-to-contribute) below.
+
 ---
 
 ## What This Is
@@ -244,35 +248,71 @@ The compressed wire format, ring buffer, and stream coordinator are identical in
 
 ## Project Status
 
-**Phase: Pre-hardware validation**
+**Phase: Pre-hardware validation -- RFCs published for community review**
 
-The RFC is drafted, the architecture is designed, the test strategy is defined. Implementation is blocked on building the physical rig (M3 Ultra + RTX PRO 6000 in Razer Core X V2).
+The architecture is designed, the wire format is specified, the test strategy is defined. Tom (TheTom, TurboQuant author) has reviewed the RFC and provided feedback that has been incorporated (asymmetric K/V compression, direct DMA management, turbo3 validated at 128K+). Implementation is blocked on building the physical rig.
 
-### Prerequisites
-- [ ] tinygrad micro-PR: Add RTX PRO 6000 Blackwell Max-Q PID to GB202 device table (`tinygrad/runtime/ops_nv.py:544`)
+### What's Done
+- [x] RFC: Compressed KV streaming wire format with double-buffer pipeline
+- [x] RFC: Multi-node Metal-CUDA bridge topology
+- [x] Architecture Decision Document (6 core decisions, implementation patterns)
+- [x] Wire format spec: 28-byte header with split K/V format fields, asymmetric compression support
+- [x] Test strategy: 3 layers (unit, integration, end-to-end) + Sprint 0 hardware validation gates
+- [x] Tom's RFC review incorporated (2026-04-04)
+
+### What's Next
+- [ ] tinygrad micro-PR: Add RTX PRO 6000 Blackwell Max-Q PID to GB202 device table
 - [ ] Build eGPU rig: RTX PRO 6000 + Razer Core X V2 + 650W+ ATX PSU
-
-### Sprint 0 -- Hardware Validation (Go/No-Go Gates)
-- [ ] tinygrad enumerates RTX PRO 6000 via PCIIface/IOKit
-- [ ] TB5 sustained throughput >= 5 GB/s
-- [ ] turbo3/turbo4 compress/decompress on Metal (M3 Ultra)
-- [ ] turbo3/turbo4 compress/decompress on CUDA (RTX PRO 6000)
-- [ ] Lloyd-Max codebook consistency between Metal and CUDA implementations
-
-### Implementation
-- [ ] Ring buffer for double-buffered KV streaming
-- [ ] KV stream coordinator using `KVCacheCompressor` API
-- [ ] Wire format: stripped turbo3/turbo4 blocks + layer header
+- [ ] Sprint 0 hardware validation (tinygrad enumeration, TB5 throughput, codebook consistency, thermal soak)
+- [ ] Implementation: wire_format.py, kv_ring_buffer.py, kv_stream.py, device_bridge.py
 - [ ] Cross-backend round-trip integration tests
 - [ ] End-to-end benchmarks
+
+## How to Contribute
+
+This project is at the RFC stage and we're actively looking for input from the community -- especially anyone running or planning a **Mac + NVIDIA eGPU** hybrid setup.
+
+### We Want to Hear From You If...
+
+- **You have a Mac + eGPU setup** (any generation). What's your TB5/TB4/TB3 sustained throughput? What enclosure are you using? What thermal behaviour have you seen under sustained GPU load? Even basic bandwidth numbers help validate our performance model.
+
+- **You're running large models locally** on Apple Silicon. What models, what context lengths, what's your current bottleneck? The bridge is designed for long-context workloads where KV cache size exceeds single-device memory.
+
+- **You use tinygrad with NVIDIA GPUs**. Have you used the `PCIIface` direct backend on macOS? Any experience with eGPU enumeration via IOKit? We need to validate the tinygrad path before implementation.
+
+- **You're interested in TurboQuant**. The compressed KV wire format is the core innovation here. If you're running turbo3/turbo4 KV cache in production or testing, your quality and latency data directly informs the bridge design.
+
+- **You have opinions on the architecture**. The RFCs are published for review. Disagree with a decision? See a gap? Think the asymmetric K/V approach should be the default? Open an issue.
+
+### Ways to Help
+
+- **Open an issue** with your hardware config, bandwidth measurements, or use case
+- **Review the RFCs** and comment on the design decisions
+- **Share TB5/eGPU thermal data** -- the biggest unknown is sustained 300W in consumer eGPU enclosures
+- **Test tinygrad eGPU enumeration** on your setup and report results
+- **Spread the word** -- the more hybrid Mac+NVIDIA users we reach, the better the bridge will be
+
+### Hardware Configurations We're Especially Interested In
+
+| Setup | Why It Matters |
+|-------|---------------|
+| M3/M4 Ultra + RTX 4090/5090 eGPU | Closest to our target config |
+| M3/M4 Pro/Max + any NVIDIA eGPU | Validates the bridge at smaller scale |
+| Any Mac + TB5 eGPU enclosure | TB5 sustained throughput data |
+| Any Mac + TB4 eGPU enclosure | TB4 baseline comparison |
+| Multi-Mac setups (with or without eGPU) | Validates the multi-cluster path |
+
+Even if your setup is different from ours, your data helps. The bridge architecture is designed to be hardware-agnostic -- the wire format doesn't care what's on either end.
 
 ## Repository Structure
 
 ```
 docs/
-  RFC-metal-cuda-kv-bridge.md       # Parent RFC: hardware topology, layer assignment
-  RFC-double-buffer-kv-bridge.md    # This RFC: compressed KV streaming bridge
-  RFC-double-buffer-kv-bridge.pdf   # PDF version with cover page and TOC
+  RFC-metal-cuda-kv-bridge.md               # Parent RFC: hardware topology, layer assignment
+  RFC-double-buffer-kv-bridge.md            # Core RFC: compressed KV streaming bridge
+  RFC-double-buffer-kv-bridge.pdf           # PDF version with cover page and TOC
+_bmad-output/planning-artifacts/
+  architecture.md                            # Architecture Decision Document (6 decisions)
 ```
 
 ## Key References
