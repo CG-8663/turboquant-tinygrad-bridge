@@ -1,8 +1,3 @@
-# Cloned dependency repos (not part of this project)
-tinygrad/
-llama-cpp-turboquant/
-turboquant_plus/
-
 # BMAD internal config
 _bmad/
 _bmad-output/
