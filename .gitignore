@@ -1,0 +1,29 @@
+# Cloned dependency repos (not part of this project)
+tinygrad/
+llama-cpp-turboquant/
+turboquant_plus/
+
+# BMAD internal config
+_bmad/
+_bmad-output/
+.claude/
+
+# Design artifacts (internal working docs)
+design-artifacts/
+
+# OS
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.opencode/
