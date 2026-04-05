@@ -1,13 +1,9 @@
-# Cloned dependency repos (not part of this project)
-tinygrad/
-llama-cpp-turboquant/
-turboquant_plus/
-
 # BMAD internal config
 _bmad/
+_bmad-output/
 .claude/
 
-# Design artifacts (empty placeholder dirs)
+# Design artifacts (internal working docs)
 design-artifacts/
 
 # OS

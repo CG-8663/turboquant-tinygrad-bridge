@@ -235,46 +235,29 @@ turbo4 blocks are already compact — no stripping needed.
 ### 3.3 Per-Layer Wire Packet
 
 ```
-┌──────────────────────────────────────────────────┐
-│ Layer Header (28 bytes)                           │
-│   layer_idx:    uint32                            │
-│   seq_len:      uint32                            │
-│   n_heads:      uint32                            │
-│   head_dim:     uint32                            │
-│   block_count:  uint32                            │
-│   flags:        uint16  (K=0x1, V=0x2, KV=0x3)   │
-│   version:      uint8   (wire format version)     │
-│   k_format:     uint8   (turbo3=3, turbo4=4,      │
-│                          q8_0=8)                   │
-│   v_format:     uint8   (turbo3=3, turbo4=4,      │
-│                          q8_0=8)                   │
-│   reserved:     uint8[3]                          │
-├──────────────────────────────────────────────────┤
-│ Compressed K cache (format per k_format)          │
-│   n_blocks = n_heads × seq_len × head_dim / 32   │
-│   Block size: 16 bytes (turbo3), 68 bytes per     │
-│               128 elem (turbo4), or q8_0 blocks   │
-├──────────────────────────────────────────────────┤
-│ Compressed V cache (format per v_format)          │
-│   May differ from K format (asymmetric mode)      │
-│   V uses TurboQuantMSE (no QJL stage)             │
-│   Block format per v_format field                 │
-└──────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│ Layer Header (24 bytes)                       │
+│   layer_idx:    uint32                        │
+│   seq_len:      uint32                        │
+│   n_heads:      uint32                        │
+│   head_dim:     uint32                        │
+│   block_count:  uint32                        │
+│   flags:        uint32  (K=0x1, V=0x2, KV=0x3)│
+├──────────────────────────────────────────────┤
+│ Compressed K cache (stripped turbo blocks)     │
+│   n_blocks = n_heads × seq_len × head_dim / 32│
+│   Each block: 16 bytes (turbo3) or            │
+│               68 bytes per 128 elem (turbo4)  │
+├──────────────────────────────────────────────┤
+│ Compressed V cache (same layout as K)         │
+│   V uses TurboQuantMSE (no QJL stage)         │
+│   Block format identical, different codebook  │
+└──────────────────────────────────────────────┘
 ```
 
-The header supports **asymmetric K/V compression** where K and V use different formats.
-Tom's review (2026-04-04) confirms: "V errors scale linearly while K errors amplify through
-softmax." Recommended asymmetric configs:
-
-| Config | K format | V format | Quality | Bandwidth savings |
-|--------|----------|----------|---------|-------------------|
-| Symmetric turbo3 | turbo3 | turbo3 | +1.06% vs q8_0 | Maximum (4.6×) |
-| **Asymmetric (recommended)** | **q8_0** | **turbo3** | **~0% vs q8_0** | **Most savings, zero quality risk** |
-| Symmetric turbo4 | turbo4 | turbo4 | +0.23% vs q8_0 | Good (3.8×) |
-
-K cache uses full TurboQuant (PolarQuant + QJL for inner product preservation), V cache
-uses TurboQuantMSE (PolarQuant only, MSE-optimal). With asymmetric mode, K can remain at
-q8_0 (or even uncompressed) while only V is compressed for the DMA transfer.
+Both `-ctk turbo3` and `-ctv turbo3` (or turbo4) are applied — K and V caches use matching
+compression. Note: K cache uses full TurboQuant (PolarQuant + QJL for inner product
+preservation), V cache uses TurboQuantMSE (PolarQuant only, MSE-optimal).
 
 ### 3.4 Endianness and Alignment
 
@@ -393,13 +376,9 @@ from typing import Tuple
 from turboquant.kv_cache import KVCacheCompressor
 import numpy as np
 
-HEADER_FMT = "<IIIIIHBBBBB"  # layer_idx, seq_len, n_heads, head_dim, block_count,
-                              # flags(u16), version(u8), k_format(u8), v_format(u8), reserved[3]
-HEADER_SIZE = struct.calcsize(HEADER_FMT)  # 28 bytes
+HEADER_FMT = "<IIIIII"  # layer_idx, seq_len, n_heads, head_dim, block_count, flags
+HEADER_SIZE = struct.calcsize(HEADER_FMT)
 FLAG_KV = 0x3
-FMT_TURBO3 = 3
-FMT_TURBO4 = 4
-FMT_Q8_0 = 8
 
 class KVStreamCoordinator:
     """
@@ -420,20 +399,9 @@ class KVStreamCoordinator:
         - Loads into tinygrad.Tensor KV cache
     """
 
-    # Supported head_dim values — models with head_dim > 128 require
-    # confirmed FA kernel instantiations on both backends (see §9, point 9)
-    SUPPORTED_HEAD_DIMS = {64, 128}  # extend as kernels are validated
-
     def __init__(self, ring: 'KVRingBuffer', head_dim: int = 128,
                  k_bits: int = 3, v_bits: int = 3, seed: int = 42):
-        if head_dim not in self.SUPPORTED_HEAD_DIMS:
-            raise WireFormatError(
-                f"head_dim={head_dim} not yet validated — FA kernel "
-                f"instantiations needed. Supported: {self.SUPPORTED_HEAD_DIMS}"
-            )
         self.ring = ring
-        self.k_format = FMT_Q8_0 if k_bits == 8 else (FMT_TURBO3 if k_bits == 3 else FMT_TURBO4)
-        self.v_format = FMT_TURBO3 if v_bits == 3 else FMT_TURBO4
         self.compressor = KVCacheCompressor(
             head_dim=head_dim, k_bits=k_bits, v_bits=v_bits, seed=seed
         )
@@ -788,46 +756,32 @@ enclosure cooling modifications are required before proceeding.
    same streaming mechanism? Prefill is compute-bound with different DMA/compute overlap
    ratios. turbo4 prefill matches q8_0 speed (1.01×); turbo3 is comparable.
 
-5. **~~turbo3 quality at 128K+ context~~** — **RESOLVED (2026-04-04, Tom review).** KL
-   divergence does NOT drift with context length — mean KLD actually decreases slightly
-   with longer context. Sjoerd Maessen is running turbo3 in production at 2×104K context
-   on a 122B model across dual L40S with no quality degradation. turbo4 is slightly safer
-   but turbo3 is validated well beyond 32K. For maximum safety on sensitive models, use
-   asymmetric config (q8_0 K + turbo3 V) per Tom's recommendation.
+5. **turbo3 quality at 128K+ context** — Benchmarks show stability through 32K. At 128K,
+   cumulative quantisation error across 80 layers needs measurement. turbo4 may be safer
+   for very long context.
 
 6. **Sparse V dequant integration** — turboquant_plus implements sparse V dequant (skip
    positions where softmax < 1e-6) for +22.8% decode speedup. Can this be applied at the
    bridge level, or only within a single backend?
 
-7. **~~Transfer path architecture (NEW, 2026-04-01)~~** — **RESOLVED (2026-04-04, Tom review).**
-   Decision: **(b) Direct DMA management.** Tom (TurboQuant author) explicitly recommends
-   bypassing tinygrad's BufferCopy: "the ring buffer memory layout is performance-critical
-   and tinygrad's BufferCopy abstraction was not designed for sustained streaming with pinned
-   staging buffers." Implementation: Metal `_as_buffer()` → memoryview → pinned host buffer;
-   CUDA side uses `cuMemHostAlloc` + `cuMemcpyAsync`. Ring buffer slots own their pinned
-   allocations with controlled lifetime. The compress/decompress can call into C kernels via
-   ctypes or use the Python reference in turboquant_plus for prototyping (Tom's suggestion).
+7. **Transfer path architecture (NEW, 2026-04-01)** — tinygrad's `_transfer()` method only
+   works within the same device family (Metal→Metal or NV→NV). Cross-backend Metal→NV falls
+   back to CPU-mediated `BufferCopy` (`copyin`/`copyout` pair). The "NV vs CUDA backend"
+   framing is a red herring — neither supports cross-family P2P.
+
+   **The real decision:** (a) Work within tinygrad's `BufferCopy` with optimised pinned
+   staging buffers, or (b) bypass tinygrad's transfer layer entirely and manage
+   Metal→host→CUDA DMA directly. Option (a) stays within tinygrad's abstractions but has
+   limited control over pinning and buffer alignment. Option (b) gives full control over
+   ring buffer memory layout but creates a maintenance surface outside tinygrad. This
+   decision must be made before integration test design — it determines the entire data
+   path under test.
 
 8. **Thermal validation in eGPU enclosure (NEW, 2026-04-01)** — Added Sprint 0 gate S0.6.
    Real-world RTX 6000 Pro Ada testing (themarkymark, Waivio 2026) validates 300W as
    optimal: 95.4% throughput, +44% tok/W efficiency. Native Blackwell 300W expected to
    match or exceed. Remaining risk: Razer Core X V2 airflow under sustained streaming load.
    Do NOT under-power below 300W — empirically worse (higher peak spikes, lower efficiency).
-
-9. **Head dimension validation (NEW, 2026-04-04, Tom review)** — Models with `head_dim=256`
-   or `head_dim=512` (Gemma 4, Qwen3.5-122B) required missing Metal FA kernel instantiations
-   at dk512. Asymmetric configs (q8_0 K + turbo V) had a rotation matrix initialisation bug
-   on `head_dim=256` that produced corrupt output. Both issues are fixed in Tom's latest
-   branches. The bridge must: (a) pin submodules to branches with these fixes, (b) add a
-   `head_dim` validation guard in the wire format that rejects unsupported values until the
-   corresponding FA kernel instantiations are confirmed on both Metal and CUDA sides, and
-   (c) include `head_dim > 128` round-trip fidelity tests in the L1 test suite.
-
-10. **CUDA decompress kernel throughput under sustained load (Tom review point #4)** — The
-    pipeline model shows decompress (0.8 ms) faster than DMA arrival (1.15 ms), suggesting
-    the consumer keeps up. Tom notes this is worth profiling under load — the key validation
-    is whether the CUDA decompress kernel sustains this rate during continuous streaming,
-    not just single-layer measurements.
 
 ---
 
@@ -843,7 +797,6 @@ enclosure cooling modifications are required before proceeding.
 - PARALLAX heterogeneous inference: https://gradient.network/parallax.pdf
 - exo-explore/exo: https://github.com/exo-explore/exo (future integration, pending Spark)
 - RTX 6000 Pro power efficiency: themarkymark (Waivio, 2026) — 300W cap on 600W Ada cards: 95.4% throughput, +44% tok/W, validates 300W operating point
-- Tom (TheTom) RFC review (2026-04-04, X): Validates wire format design, recommends asymmetric K/V (q8_0 K + turbo V), recommends direct DMA over BufferCopy, confirms turbo3 stable at 128K+, flags head_dim=256/512 kernel bugs (fixed in latest branches)
 
 ---
 

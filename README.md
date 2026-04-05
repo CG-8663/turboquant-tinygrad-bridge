@@ -2,10 +2,6 @@
 
 **Compressed KV cache as a cross-backend wire format for Metal + CUDA split inference**
 
-> **Status: Work in Progress -- RFC stage, seeking community input**
->
-> This project is in the design and validation phase. The RFCs and architecture are published here for public review. If you're running a Mac + NVIDIA eGPU setup (or planning one), we want your input -- hardware configurations, bandwidth measurements, use cases, pain points. See [How to Contribute](#how-to-contribute) below.
-
 ---
 
 ## What This Is
@@ -248,72 +244,114 @@ The compressed wire format, ring buffer, and stream coordinator are identical in
 
 ## Project Status
 
-**Phase: Pre-hardware validation -- RFCs published for community review**
-
-The architecture is designed, the wire format is specified, the test strategy is defined. Tom (TheTom, TurboQuant author) has reviewed the RFC and provided feedback that has been incorporated (asymmetric K/V compression, direct DMA management, turbo3 validated at 128K+). Implementation is blocked on building the physical rig.
+**Phase: Active development -- bridge core implemented, pending hardware validation**
 
 ### What's Done
-- [x] RFC: Compressed KV streaming wire format with double-buffer pipeline
-- [x] RFC: Multi-node Metal-CUDA bridge topology
-- [x] Architecture Decision Document (6 core decisions, implementation patterns)
-- [x] Wire format spec: 28-byte header with split K/V format fields, asymmetric compression support
-- [x] Test strategy: 3 layers (unit, integration, end-to-end) + Sprint 0 hardware validation gates
-- [x] Tom's RFC review incorporated (2026-04-04)
 
-### What's Next
-- [ ] tinygrad micro-PR: Add RTX PRO 6000 Blackwell Max-Q PID to GB202 device table
-- [ ] Build eGPU rig: RTX PRO 6000 + Razer Core X V2 + 650W+ ATX PSU
-- [ ] Sprint 0 hardware validation (tinygrad enumeration, TB5 throughput, codebook consistency, thermal soak)
-- [ ] Implementation: wire_format.py, kv_ring_buffer.py, kv_stream.py, device_bridge.py
-- [ ] Cross-backend round-trip integration tests
-- [ ] End-to-end benchmarks
+**Planning & Architecture (completed 2026-04-05)**
+- PRD with functional requirements, acceptance criteria, and phased milestones
+- Architecture document with component design, data flow diagrams, and interface contracts
+- 25 stories across 6 epics decomposed from the RFCs and TheTom's review
+- TheTom (TurboQuant author) reviewed the RFC and provided key architectural input (2026-04-04)
 
-## How to Contribute
+**Wire Protocol (`tqbridge.wire`) -- 19 tests passing**
+- Versioned 40-byte binary header with CRC32 integrity checking
+- `Format` enum: FP16, Q8_0, Q5_K_M, TURBO4, TURBO3, TURBO2
+- `encode_header()` / `decode_header()` with magic validation, version gating, CRC32
+- Format negotiation: defaults to asymmetric q8_0 K + turbo3 V (per TheTom recommendation)
+- CLI override support (`--fmt-k`, `--fmt-v`)
 
-This project is at the RFC stage and we're actively looking for input from the community -- especially anyone running or planning a **Mac + NVIDIA eGPU** hybrid setup.
+**Compression Pipeline (`tqbridge.compression`) -- 28 tests passing**
+- PolarQuant (TurboQuant without QJL): Haar-random rotation via QR decomposition, Lloyd-Max codebook, compact bit packing
+- turbo3 (3-bit, 4.6x), turbo4 (4-bit, 3.8x), turbo2 (2-bit, 6.4x) -- all validated
+- q8_0 (ggml-compatible 34-byte blocks) for high-precision Key compression
+- FP16 passthrough for uncompressed transfers
+- Asymmetric K/V: independent compression of Keys and Values in a single pipeline call
+- Deterministic WHT rotation matrix -- same seed produces identical rotation on both backends
+- Tested across head_dim = {64, 128, 256}
 
-### We Want to Hear From You If...
+**Repository Structure**
+- Dependencies (llama-cpp-turboquant, turboquant_plus, tinygrad) converted to git submodules pinned to specific commits
 
-- **You have a Mac + eGPU setup** (any generation). What's your TB5/TB4/TB3 sustained throughput? What enclosure are you using? What thermal behaviour have you seen under sustained GPU load? Even basic bandwidth numbers help validate our performance model.
+### What's Next -- Pending Hardware Validation
 
-- **You're running large models locally** on Apple Silicon. What models, what context lengths, what's your current bottleneck? The bridge is designed for long-context workloads where KV cache size exceeds single-device memory.
+**Prerequisites (Epic 0)**
+- [ ] Pin submodules to TheTom's head_dim=256/512-fixed branches
+- [ ] Validate tinygrad PCIe enumeration of eGPU (vs USB-only discovery)
+- [ ] tinygrad micro-PR: RTX PRO 6000 Blackwell PID addition
 
-- **You use tinygrad with NVIDIA GPUs**. Have you used the `PCIIface` direct backend on macOS? Any experience with eGPU enumeration via IOKit? We need to validate the tinygrad path before implementation.
+**DMA & Double-Buffer (Epic 3)**
+- [ ] Pinned staging buffer allocation (Metal `storageModeShared`)
+- [ ] DMA-direct transfers via IOKit (not tinygrad BufferCopy -- per TheTom recommendation)
+- [ ] Ping-pong double-buffer with fence synchronisation
+- [ ] Target: >= 90% DMA/compute overlap, >= 80% of TB5 ceiling
 
-- **You're interested in TurboQuant**. The compressed KV wire format is the core innovation here. If you're running turbo3/turbo4 KV cache in production or testing, your quality and latency data directly informs the bridge design.
+**Bridge Controller (Epic 4)**
+- [ ] Full pipeline orchestration: compress -> DMA -> decompress
+- [ ] Hidden state passthrough (16 KB/token, no compression)
+- [ ] Thermal gate for eGPU enclosure (S0.6 power state)
+- [ ] Per-layer metrics and observability
 
-- **You have opinions on the architecture**. The RFCs are published for review. Disagree with a decision? See a gap? Think the asymmetric K/V approach should be the default? Open an issue.
+**End-to-End Validation (Epic 5)**
+- [ ] Single-layer decode across TB5
+- [ ] Llama 3 70B Q5_K_M split across M3 Ultra + RTX PRO 6000
+- [ ] Llama 3 405B Q4_K_M across 192 GB pool
+- [ ] CUDA decompress profiling under sustained load
 
-### Ways to Help
+### Key Architecture Decisions (from TheTom Review)
 
-- **Open an issue** with your hardware config, bandwidth measurements, or use case
-- **Review the RFCs** and comment on the design decisions
-- **Share TB5/eGPU thermal data** -- the biggest unknown is sustained 300W in consumer eGPU enclosures
-- **Test tinygrad eGPU enumeration** on your setup and report results
-- **Spread the word** -- the more hybrid Mac+NVIDIA users we reach, the better the bridge will be
-
-### Hardware Configurations We're Especially Interested In
-
-| Setup | Why It Matters |
-|-------|---------------|
-| M3/M4 Ultra + RTX 4090/5090 eGPU | Closest to our target config |
-| M3/M4 Pro/Max + any NVIDIA eGPU | Validates the bridge at smaller scale |
-| Any Mac + TB5 eGPU enclosure | TB5 sustained throughput data |
-| Any Mac + TB4 eGPU enclosure | TB4 baseline comparison |
-| Multi-Mac setups (with or without eGPU) | Validates the multi-cluster path |
-
-Even if your setup is different from ours, your data helps. The bridge architecture is designed to be hardware-agnostic -- the wire format doesn't care what's on either end.
+| Decision | Rationale |
+|----------|-----------|
+| **Asymmetric K/V** (q8_0 K + turbo3 V) | V errors scale linearly, K errors amplify through softmax |
+| **DMA-direct** over tinygrad BufferCopy | Ring buffer layout is performance-critical for sustained streaming |
+| **turbo3 validated at 128K+** | KL divergence does not drift with context; confirmed in production by Sjoerd Maessen |
+| **Pin to head_dim-fixed branches** | dk512 Metal FA and head_dim=256 rotation matrix bugs fixed in TheTom's latest |
 
 ## Repository Structure
 
 ```
+src/tqbridge/                       # Bridge implementation (Python)
+  wire.py                           #   Wire header, CRC32, format negotiation
+  compression.py                    #   PolarQuant + q8_0 compress/decompress
+  dma.py                            #   DMA manager (stub -- needs hardware)
+  bridge.py                         #   Bridge controller (stub -- needs hardware)
+  thermal.py                        #   Thermal monitor (stub -- needs hardware)
+  metrics.py                        #   Per-layer telemetry (stub)
+  kernels/                          #   ctypes FFI to Metal/CUDA kernels (stub)
+tests/                              # 49 tests, all passing
+  test_wire.py                      #   Wire protocol tests (19)
+  test_compression.py               #   Compression pipeline tests (28)
+  test_smoke.py                     #   Import and version tests (2)
+benchmarks/                         # Performance benchmarks (planned)
 docs/
-  RFC-metal-cuda-kv-bridge.md               # Parent RFC: hardware topology, layer assignment
-  RFC-double-buffer-kv-bridge.md            # Core RFC: compressed KV streaming bridge
-  RFC-double-buffer-kv-bridge.pdf           # PDF version with cover page and TOC
-_bmad-output/planning-artifacts/
-  architecture.md                            # Architecture Decision Document (6 decisions)
+  RFC-double-buffer-kv-bridge.md    # Compressed KV streaming bridge RFC
+  RFC-double-buffer-kv-bridge.pdf   # PDF version with cover page and TOC
+  RFC-metal-cuda-kv-bridge.md       # Multi-cluster heterogeneous inference RFC
+llama-cpp-turboquant/               # submodule: TheTom's Metal + CUDA kernels
+turboquant_plus/                    # submodule: benchmarks, papers, reference impl
+tinygrad/                           # submodule: tinygrad direct backend
 ```
+
+## Wiki
+
+LLM-maintained knowledge base following [Karpathy's LLM Wiki pattern](https://github.com/karpathy/llm-wiki). The wiki compiles ecosystem research, benchmarks, and cross-references into persistent, interlinked pages.
+
+```
+wiki/
+  index.md              # Page catalog
+  log.md                # Chronological activity log
+  entities/             # People and organisations
+  concepts/             # Technical concepts and patterns
+  sources/              # Ingested source documents with citations
+```
+
+Browse from `wiki/index.md`. The LLM maintains all pages — humans curate sources and ask questions.
+
+## Dependency: Chronara Flywheel
+
+This project is a **direct dependency** of the [chronaracli flywheel](https://github.com/CG-8663/chronaracli) training pipeline. The flywheel uses the LLM Wiki pattern as a layer between raw interaction logs (Elasticsearch) and QLoRA fine-tuning on the GX10 cluster. The bridge provides the cross-device inference capacity the flywheel needs to train at scale.
+
+The wiki also serves as a **quality gate for bridge validation** — same sources ingested through Metal-only, CUDA-only, and split inference paths. Identical wiki output confirms compressed KV wire format doesn't degrade downstream quality.
 
 ## Key References
 

@@ -1,0 +1,9 @@
+[submodule "llama-cpp-turboquant"]
+	path = llama-cpp-turboquant
+	url = https://github.com/TheTom/llama-cpp-turboquant
+[submodule "turboquant_plus"]
+	path = turboquant_plus
+	url = https://github.com/TheTom/turboquant_plus
+[submodule "tinygrad"]
+	path = tinygrad
+	url = https://github.com/tinygrad/tinygrad.git
