@@ -1,0 +1,32 @@
+{
+  "METAL": {
+    "device": "METAL",
+    "prefill_512_gflops": 7416.3,
+    "prefill_2048_gflops": 13722.6,
+    "prefill_4096_gflops": 16765.1,
+    "decode_tok_per_sec": 48.4,
+    "kv_alloc_ms": 126.5,
+    "kv_fill_ms": 11.1,
+    "kv_read_ms": 72.8,
+    "turbo_compress_gbs": 14.6,
+    "turbo_decompress_gbs": 18.7,
+    "transfer_raw_ms": 214.7,
+    "transfer_turbo3_ms": 46.7,
+    "transfer_turbo4_ms": 56.5
+  },
+  "NV": {
+    "device": "NV",
+    "prefill_512_gflops": 6165.3,
+    "prefill_2048_gflops": 14423.5,
+    "prefill_4096_gflops": 16168.0,
+    "decode_tok_per_sec": 48.2,
+    "kv_alloc_ms": 17.5,
+    "kv_fill_ms": 10.5,
+    "kv_read_ms": 64.4,
+    "turbo_compress_gbs": 14.7,
+    "turbo_decompress_gbs": 23.5,
+    "transfer_raw_ms": 214.7,
+    "transfer_turbo3_ms": 46.7,
+    "transfer_turbo4_ms": 56.5
+  }
+}
