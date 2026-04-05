@@ -1,0 +1,63 @@
+site_name: TurboQuant Bridge Wiki
+site_url: https://tqbridge.chronara.io
+site_description: LLM-maintained knowledge base for the TurboQuant cross-backend KV cache bridge
+site_author: Chronara Group Limited
+
+docs_dir: wiki
+
+theme:
+  name: material
+  palette:
+    - scheme: slate
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+    - scheme: default
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+  features:
+    - navigation.sections
+    - navigation.expand
+    - search.highlight
+    - content.code.copy
+
+nav:
+  - Home: index.md
+  - Activity Log: log.md
+  - Concepts:
+    - TurboQuant Compression: concepts/turboquant-compression.md
+    - TurboQuant+ Weights: concepts/turboquant-plus-weights.md
+    - Cross-Backend Wire Format: concepts/cross-backend-wire-format.md
+    - LLM Wiki Pattern: concepts/llm-wiki-pattern.md
+    - MLX Cross-Backend: concepts/mlx-cross-backend.md
+  - Entities:
+    - Tom Turney: entities/tom-turney.md
+    - Prince Canuma: entities/prince-canuma.md
+    - Andrej Karpathy: entities/andrej-karpathy.md
+  - Sources:
+    - Turney — TurboQuant llama.cpp: sources/turney-turboquant-llama-cpp.md
+    - Turney — TurboQuant+ Weights: sources/turney-turboquant-plus-weights.md
+    - Turney — Independent Validation: sources/turney-independent-validation.md
+    - Canuma — Voxtral on MLX + CUDA: sources/canuma-voxtral-mlx.md
+    - Canuma — MLX-VLM: sources/canuma-mlx-vlm.md
+    - Canuma — MLX-Audio: sources/canuma-mlx-audio.md
+    - llama.cpp Discussion #20969: sources/llamacpp-discussion-20969.md
+    - TurboQuant Benchmarks — Apple Silicon: sources/turboquant-benchmarks-apple-silicon.md
+    - Karpathy — LLM Wiki Pattern: sources/karpathy-llm-wiki.md
+
+markdown_extensions:
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - admonition
+  - pymdownx.details
