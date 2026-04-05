@@ -244,6 +244,64 @@ This validates that TurboQuant's quality claims hold on real math reasoning task
 
 ---
 
+## Test Coverage: What's Been Validated vs Gaps
+
+Based on all known TurboQuant implementations across [llama.cpp #20969](https://github.com/ggml-org/llama.cpp/discussions/20969), MLX-VLM, and this project.
+
+### Validated (green)
+
+| Area | Details | By |
+|------|---------|-----|
+| **Metal GPU (Apple Silicon)** | turbo2/3/4 KV, flash attention, sparse V, 4-mag LUT | @TheTom (M5 Max), community (M1 Max, M3 Max) |
+| **CUDA (consumer)** | turbo3 KV, dequant-then-MMA, norm correction | @spiritbuun/@signalnine (RTX 3090), @jaker86 (RTX 3090/4090/5090) |
+| **CUDA (Blackwell)** | turbo2/3/4, sm_120, CUDA 13.0 | This project (GB10, RTX PRO 6000) |
+| **CPU (x86)** | turbo3 KV via vec_dot, flash attention | @Aaryan-Kapoor (AVX2, SSE3) |
+| **CPU (ARM)** | turbo3 KV, CPU path | @Aaryan-Kapoor |
+| **MLX (Apple)** | TurboQuant in MLX-VLM v0.4.4 | @prince_canuma (M3 Max) |
+| **Vulkan (early)** | turbo3 + QJL, flash attention critical | @tetherto (1080 Ti) |
+| **Quality: PPL** | turbo3 +1.06%, turbo4 +0.23% vs q8_0 (wikitext-2) | @TheTom, multiple independent |
+| **Quality: NIAH** | 9/9 single needle with sparse V, 100% multi-key through 32K | @TheTom (M5 Max) |
+| **Quality: Math** | 17/65 identical to f16 baseline, 2.7x compression | @TheTom (M5 Max) |
+| **Quality: KL divergence** | turbo4 KLD 40% lower than turbo3, same top-p as q4_0 | @TheTom |
+| **Long context decode** | 2x faster at 375K on Gemma 4 26B-A4B | @prince_canuma (M3 Max) |
+| **Context scaling** | Flat 98.7-99.5% through 32K after dequant fix | @TheTom (M5 Max) |
+| **Asymmetric K/V** | q8_0-K + turbo4-V rescues quality on Q4_K_M models | @TheTom, @mariotomich |
+| **MoE models** | Qwen3.5-35B-A3B validated, 0.98-0.99x decode | This project (GB10), @TheTom |
+| **Hybrid arch** | Qwen3.5-27B: only 16/64 layers have KV cache | @TheTom |
+| **QJL unnecessary** | All bits to Lloyd-Max centroids is better — confirmed by 3+ independent implementers | @TheTom, @Aaryan-Kapoor, @dejanseo, @arclabs |
+| **vLLM comparison** | llama.cpp turbo 1.8x faster decode than vLLM FP16 on GB10 | This project |
+
+### Gaps (not yet tested or incomplete)
+
+| Gap | Status | Blocker | Priority |
+|-----|--------|---------|----------|
+| **CUDA turbo4** | Not ported | turbo4 Metal-only, CUDA needs 4-bit nibble dequant kernel | HIGH |
+| **CUDA turbo2** | Not ported | Same as turbo4 — 2-bit pack/unpack kernel needed | MEDIUM |
+| **AMD ROCm / HIP** | No implementation | No one working on it publicly | HIGH |
+| **Intel Arc / SYCL** | No implementation | No one working on it publicly | LOW |
+| **Vulkan (production)** | Early prototype only | ~50% utilization, needs optimization | MEDIUM |
+| **Android / Qualcomm** | No implementation | Mobile inference demand exists | LOW |
+| **CUDA 13.1** | Known segfault | MMQ kernel crash — use CUDA 13.0 | BLOCKER (known) |
+| **Multi-GPU** | Untested | Should work (3x RTX 3090 KV fits 262K) but not validated | MEDIUM |
+| **Norm correction on Metal** | Merged but not in all forks | PPL beats q8_0 on CUDA with norm correction | LOW (merged) |
+| **Sparse V on CUDA** | Not ported | Metal-only currently | MEDIUM |
+| **Sparse V on CPU** | Not implemented | Attention weight thresholding in vec_dot | LOW |
+| **turbo3 weight quantization** | Not applicable | TQ is KV cache only — not model weights | N/A |
+| **Large model (397B+)** | Partial | @tarruda tested on M1 Ultra but hit context scaling regression (now fixed) | MEDIUM |
+| **Dense large (70B+)** | Untested at long context | Only MoE models tested extensively at 32K+ | MEDIUM |
+| **Batch serving** | Untested | Multiple concurrent requests with turbo KV | HIGH |
+| **Speculative decoding** | Untested | turbo KV + speculative decode interaction | LOW |
+| **vLLM integration** | No native support | vLLM has no KV compression equivalent | N/A (comparison only) |
+| **GGUF upstream PR** | In preparation | llama.cpp CONTRIBUTING.md requirements | HIGH |
+
+### Key Risks from the Discussion
+
+1. **"Coherent text" is not a quality gate.** @TheTom hit PPL 165 (catastrophic) with output that looked fine. Always run `llama-perplexity` before trusting speed numbers.
+2. **ggml column-major storage.** Row-major C array stored in ggml tensor is silently transposed. Caused PPL 23.5 regression. [Full investigation](https://github.com/TheTom/turboquant_plus/blob/main/docs/pre-rotate-queries-investigation.md).
+3. **Context scaling compounds on deep models.** 2% gap per context doubling × 100+ layers = major regression on 397B models. The dequant unroll fix addresses this but needs validation on very large models.
+
+---
+
 ## Hardware
 
 | System | GPU | Memory | Connection | Role |
