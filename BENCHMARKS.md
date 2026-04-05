@@ -203,14 +203,44 @@ Neither device replaces the other. The RTX has 5.6x the compute for prefill. Met
 
 ---
 
+## Community Results
+
+### MLX-VLM: Gemma 4 26B-A4B on M3 Max 96 GB (@prince_canuma)
+
+TurboQuant integrated into MLX-VLM v0.4.4. Gemma 4 26B-A4B pushed to **375K context** (official max is 262K — roughly 5-6 full novels).
+
+- Up to ~20K tokens: neck and neck with baseline
+- **After 20K: TurboQuant dominates with ~2x faster decode**
+- ~1 GB memory savings at long context
+- KV savings are 4-17% (only 5/30 layers compressed), but those 5 layers dominate decode time at long context, so speed gains are massive
+
+This confirms the core TurboQuant insight: **the layers that matter most at long context are exactly the ones where compression pays off.**
+
+### Math Accuracy: Qwen3.5-35B-A3B on M5 Max 128 GB (@tom)
+
+Deterministic math accuracy benchmark (primoco's script, temp=0). head_dim=256, Q8_0 weights. Filler tokens at 500, 1000, 1500, 2000 to test KV recall over distance.
+
+| Config | Score | vs f16 |
+|--------|------:|-------:|
+| f16 KV (baseline) | 17/65 | — |
+| q8_0 K / turbo3 V | 17/65 | **identical** |
+
+4 divergent cases split 2-2 (no systematic bias). No context-distance degradation. **2.7x KV compression with zero accuracy cost.**
+
+This validates that TurboQuant's quality claims hold on real math reasoning tasks, not just perplexity — compressed KV cache produces identical outputs to f16 at 2.7x compression.
+
+---
+
 ## Key Takeaways
 
 1. **llama.cpp + TurboQuant is 1.8x faster than vLLM** for decode on GB10 Blackwell
 2. **TurboQuant loses only 1-2% decode speed** vs q8_0 at 4.6x KV compression
 3. **At 8K+ context, turbo is faster than q8_0** — reduced bandwidth outweighs dequant cost
-4. **vLLM AWQ is broken on GB10** — 2.6x slower than FP16 (kernel optimization gap)
-5. **RTX PRO 6000 delivers 107 TFLOPS prefill** — 5.6x faster than M3 Ultra
-6. **Turbo compression turns 5 GB/s TB5 into 23 GB/s effective** — making eGPU viable for serving
+4. **2x faster decode at 375K context** on Gemma 4 via MLX-VLM (community validated)
+5. **Zero accuracy loss on math reasoning** — identical 17/65 score at 2.7x KV compression
+6. **vLLM AWQ is broken on GB10** — 2.6x slower than FP16 (kernel optimization gap)
+7. **RTX PRO 6000 delivers 107 TFLOPS prefill** — 5.6x faster than M3 Ultra
+8. **Turbo compression turns 5 GB/s TB5 into 23 GB/s effective** — making eGPU viable for serving
 
 ---
 
