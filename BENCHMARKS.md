@@ -244,6 +244,69 @@ This validates that TurboQuant's quality claims hold on real math reasoning task
 
 ---
 
+## How We Compare to the Community (llama.cpp [#20969](https://github.com/ggml-org/llama.cpp/discussions/20969))
+
+The discussion thread tracks TurboQuant development across ~10 independent implementations. Here's where our results fit in the timeline from initial implementation to current state.
+
+### Speed: The Journey from 8x Slower to Faster-Than-Baseline
+
+| Milestone | Who | Prefill vs q8_0 | Decode vs q8_0 | When |
+|-----------|-----|----------------:|---------------:|------|
+| First Metal implementation | @TheTom | 0.12x (8x slower) | — | Early March |
+| + fp16 WHT | @TheTom | 0.40x | — | Mid March |
+| + graph-side WHT rotation | @TheTom | 0.78x | — | Late March |
+| + block-32 storage | @TheTom | **1.02x (parity!)** | — | Late March |
+| Context scaling regression found | @TheTom, @tarruda | 1.02x (short) | 0.76x (32K) | Late March |
+| Context scaling regression fixed | @TheTom | 1.02x | **0.99x (32K)** | Late March |
+| CPU implementation (zero penalty) | @Aaryan-Kapoor | 1.04x | ~1.0x | Late March |
+| CUDA (RTX 3090, norm correction) | @spiritbuun | 0.99x | — | April |
+| CUDA (RTX 3090, community) | @jaker86 | 0.98x | 0.96x | April |
+| **Our GB10 results** | **This project** | **0.98-1.01x** | **0.97-1.05x** | **April 5** |
+
+**Our numbers confirm the community's best results** — turbo3 is within 1-2% of q8_0 on both prefill and decode. At 8K context we actually see turbo **5% faster** than q8_0 (26.4 vs 25.3 tok/s), matching the theory that compressed KV reads less bandwidth.
+
+### Quality: PPL Convergence Across Implementations
+
+| Implementation | Model | turbo3 PPL | q8_0 PPL | Delta | Notes |
+|----------------|-------|----------:|----------:|------:|-------|
+| @TheTom (Metal, early) | Qwen3.5-35B | 6.20 | 5.41 | +14.6% | Before norm correction |
+| @TheTom (Metal, TOT) | Qwen3.5-35B | 6.176 | 6.111 | **+1.06%** | With norm correction |
+| @spiritbuun (CUDA) | — | — | — | **-1.17%** | Norm correction beats q8_0 on CUDA |
+| @Aaryan-Kapoor (CPU) | — | — | — | ~0% | "Output identical to f16 at temp 0" |
+| @TheTom (math bench) | Qwen3.5-35B | 17/65 | 17/65 | **0%** | Identical to f16 baseline |
+| **Our GB10 results** | **Qwen3-8B** | — | — | **<2% speed** | Not PPL-tested yet (gap) |
+
+**Our gap:** We benchmarked speed but haven't run PPL validation on the GB10. This is a known risk — @TheTom's cautionary tale of PPL 165 with "coherent looking" output shows speed numbers without PPL are incomplete.
+
+### Hardware Coverage: Where We Add New Data
+
+| Hardware | Previous Coverage | Our Contribution |
+|----------|-------------------|-----------------|
+| M5 Max (Metal) | Extensive (@TheTom) | — |
+| M3 Max (Metal) | @prince_canuma (MLX) | — |
+| M1 Max (Metal) | @mariotomich (community) | Documented in matrix, not yet tested |
+| M1 Ultra (Metal) | @tarruda (397B, regression) | — |
+| RTX 3090 (CUDA) | @jaker86, @spiritbuun | — |
+| RTX 4090/5090 (CUDA) | @jaker86 (community) | — |
+| **NVIDIA GB10 (Blackwell)** | **None** | **First turbo benchmarks on Grace Blackwell** |
+| **RTX PRO 6000 (Blackwell eGPU)** | **None** | **First eGPU turbo benchmarks via TinyGPU/TB5** |
+| **vLLM comparison** | **None** | **First head-to-head llama.cpp turbo vs vLLM** |
+
+**We provide 3 firsts:** GB10 Blackwell benchmarks, eGPU via Thunderbolt 5 benchmarks, and a direct vLLM comparison. No one else in the discussion had tested on Grace Blackwell or compared against vLLM.
+
+### Known Issues from the Discussion That Affect Us
+
+| Issue | Status in Discussion | Our Status |
+|-------|---------------------|------------|
+| Context scaling regression (2% per doubling) | **Fixed** by dequant unroll | Fixed in TOT build we tested |
+| CUDA 13.1 MMQ segfault | Known, use 13.0 | We use CUDA 13.0 (safe) |
+| ggml column-major transpose bug | Documented, fix known | N/A (we use llama-bench, not custom code) |
+| AWQ performance on new hardware | Not discussed | **We found it: vLLM AWQ is 2.6x slower than FP16 on GB10** |
+| turbo4 CUDA not ported | Still Metal-only | Confirmed — our GB10 runs turbo4 via @TheTom's fork |
+| Sparse V not on CUDA | Metal-only | Not tested on our CUDA setup |
+
+---
+
 ## Test Coverage: What's Been Validated vs Gaps
 
 Based on all known TurboQuant implementations across [llama.cpp #20969](https://github.com/ggml-org/llama.cpp/discussions/20969), MLX-VLM, and this project.
