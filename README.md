@@ -2,6 +2,12 @@
 
 **Compressed KV cache as a cross-backend wire format for Metal + CUDA split inference**
 
+<p align="center">
+  <img src="assets/bridge-hardware.jpg" alt="Mac Studio + Razer Core X V2 (RTX PRO 6000 Blackwell)" width="400">
+</p>
+
+<p align="center"><em>Mac Studio M3 Ultra + Razer Core X V2 (RTX PRO 6000 Blackwell) — 224 GB combined, connected via Thunderbolt 5</em></p>
+
 ![TurboQuant Bridge Architecture](assets/bridge-architecture.png)
 
 > **[Full Benchmark Results](BENCHMARKS.md)** -- 3 models, 3 systems, PPL validated. turbo4 beats q8_0 on 35B MoE. llama.cpp turbo is 1.8x faster than vLLM.
