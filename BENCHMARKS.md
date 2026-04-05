@@ -103,6 +103,30 @@ Three systems tested, ordered from slowest to fastest decode throughput.
 
 > Quality scales with model size. On 35B MoE, turbo4 **beats** q8_0 PPL. The 8B dense model shows higher delta as expected — the paper notes quality improves with larger models. The 27B hybrid has minimal KV layers (16/64), so compression affects less of the model.
 
+### Optimized Build (FA_ALL_QUANTS=ON, auto-detected 121a-real)
+
+Rebuilding with `GGML_CUDA_FA_ALL_QUANTS=ON` enables flash attention kernels for turbo quant types. Auto-detected CUDA arch `121a-real` (do NOT use explicit `CMAKE_CUDA_ARCHITECTURES=120` — crashes on GB10).
+
+**Qwen3-8B (optimized vs baseline):**
+
+| KV Cache | Baseline pp512 | Optimized pp512 | Gain | Baseline tg128 | Optimized tg128 | Gain |
+|----------|------:|------:|------:|------:|------:|------:|
+| q8_0 | 1,857 | **2,216** | **+19%** | 25.80 | 26.16 | +1.4% |
+| turbo4 | 1,824 | **2,150** | **+18%** | 25.14 | 25.65 | +2.0% |
+| turbo3 | 1,869 | **2,154** | **+15%** | 25.27 | 25.82 | +2.2% |
+
+**Qwen3.5-35B MoE (optimized — turbo faster than q8_0):**
+
+| KV Cache | Optimized pp512 | Optimized pp8192 | Optimized tg128 | vs q8_0 (opt) |
+|----------|------:|------:|------:|------:|
+| q8_0 | 1,053 | 1,601 | 44.92 | baseline |
+| turbo4 | **1,818** | **1,763** | **45.84** | **1.02x** |
+| turbo3 | **1,835** | **1,775** | **46.20** | **1.03x** |
+
+> With `FA_ALL_QUANTS=ON`, **turbo3 is faster than q8_0 across the board on 35B MoE** — 1.74x faster prefill (1,835 vs 1,053) and 3% faster decode (46.2 vs 44.9). The FA kernel path handles turbo quants natively instead of falling back to non-FA attention.
+
+> **Build flag finding:** `CMAKE_CUDA_ARCHITECTURES=120` causes MMQ kernel segfaults on GB10. Let cmake auto-detect to `121a-real`. This is a new Blackwell-specific issue not documented in the llama.cpp discussion.
+
 ---
 
 ## System 3: M3 Ultra + RTX PRO 6000 Blackwell eGPU (Bridge)
@@ -187,12 +211,13 @@ All decode results on the same model family, ordered worst to best:
 
 | Rank | System | Engine | Config | tg128 (tok/s) | vs #1 |
 |-----:|--------|--------|--------|------:|------:|
-| 6 | GX10 (GB10) | vLLM | AWQ INT4 | 5.4 | 1.0x |
-| 5 | GX10 (GB10) | vLLM | FP16 | 14.2 | 2.6x |
-| 4 | GX10 (GB10) | llama.cpp | turbo3 (4.6x KV) | 25.3 | 4.7x |
-| 3 | GX10 (GB10) | llama.cpp | q8_0 | 25.8 | 4.8x |
-| 2 | M3 Ultra | tinygrad | decode sim | 45.5 | 8.4x |
-| **1** | **GX10 (GB10)** | **llama.cpp** | **q8_0 (35B MoE)** | **54.3** | **10.1x** |
+| 7 | GX10 | vLLM | AWQ INT4 | 5.4 | 1.0x |
+| 6 | GX10 | vLLM | FP16 | 14.2 | 2.6x |
+| 5 | GX10 | llama.cpp | turbo3 (4.6x KV) | 25.8 | 4.8x |
+| 4 | GX10 | llama.cpp (opt) | q8_0 (35B, FA_ALL) | 44.9 | 8.3x |
+| 3 | M3 Ultra | tinygrad | decode sim | 45.5 | 8.4x |
+| 2 | GX10 | llama.cpp (opt) | **turbo3 (35B, FA_ALL)** | **46.2** | **8.6x** |
+| **1** | **GX10** | **llama.cpp** | **q8_0 (35B MoE, baseline)** | **54.3** | **10.1x** |
 
 ### Prefill Throughput Ranking
 
@@ -240,7 +265,7 @@ TurboQuant integrated into MLX-VLM v0.4.4. Gemma 4 26B-A4B pushed to **375K cont
 
 This confirms the core TurboQuant insight: **the layers that matter most at long context are exactly the ones where compression pays off.**
 
-### Math Accuracy: Qwen3.5-35B-A3B on M5 Max 128 GB (@tom)
+### Math Accuracy: Qwen3.5-35B-A3B on M5 Max 128 GB (@TheTom)
 
 Deterministic math accuracy benchmark (primoco's script, temp=0). head_dim=256, Q8_0 weights. Filler tokens at 500, 1000, 1500, 2000 to test KV recall over distance.
 
@@ -252,6 +277,8 @@ Deterministic math accuracy benchmark (primoco's script, temp=0). head_dim=256, 
 4 divergent cases split 2-2 (no systematic bias). No context-distance degradation. **2.7x KV compression with zero accuracy cost.**
 
 This validates that TurboQuant's quality claims hold on real math reasoning tasks, not just perplexity — compressed KV cache produces identical outputs to f16 at 2.7x compression.
+
+**This result is included in our baseline** — it was independently validated by @TheTom on M5 Max, the same hardware that produced the canonical TurboQuant benchmarks. Our GX10 PPL results (turbo4 -0.1%, turbo3 +1.1% on 35B MoE) confirm the same quality profile on CUDA/Blackwell.
 
 ---
 

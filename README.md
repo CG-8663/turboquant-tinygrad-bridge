@@ -2,6 +2,10 @@
 
 **Compressed KV cache as a cross-backend wire format for Metal + CUDA split inference**
 
+![TurboQuant Bridge Architecture](assets/bridge-architecture.png)
+
+> **[Full Benchmark Results](BENCHMARKS.md)** -- 3 models, 3 systems, PPL validated. turbo4 beats q8_0 on 35B MoE. llama.cpp turbo is 1.8x faster than vLLM.
+
 ---
 
 ## What This Is
@@ -48,11 +52,12 @@ Using compressed KV as the wire format for cross-backend streaming is a new angl
 
 ### The Hardware
 
-| Node | Memory | Backend | Link |
-|------|--------|---------|------|
-| Mac M3 Ultra | 96 GB unified | Metal / MLX | -- (host) |
-| RTX PRO 6000 Blackwell (300W) | 96 GB GDDR7 | tinygrad direct | TB5 PCIe 4.0 x4 (~6 GB/s) |
-| **Combined** | **192 GB** | **Heterogeneous** | |
+| Node | Memory | Backend | Link | Benchmarked |
+|------|--------|---------|------|-------------|
+| Mac M3 Ultra | 128 GB unified | Metal / MLX | -- (host) | 32.8 GB/s BW, 17K GFLOPS FP16 |
+| RTX PRO 6000 Blackwell (300W) | 96 GB GDDR7 | tinygrad direct | TB5 PCIe 4.0 x4 (~6 GB/s) | 107 TFLOPS prefill, 60.9 TFLOPS FP16 |
+| ASUS GX10 (chronara-001) | 128 GB unified | CUDA 13.0 | LAN | llama.cpp turbo + vLLM validated |
+| **Combined (bridge)** | **224 GB** | **Heterogeneous** | | |
 
 The RTX PRO 6000 uses the GB202 die (same as RTX 5090), which tinygrad already supports. The GPU is addressed via tinygrad's `PCIIface` backend using IOKit on macOS -- no Linux host, no NVIDIA drivers, no CUDA runtime required.
 
