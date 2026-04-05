@@ -270,8 +270,17 @@ The compressed wire format, ring buffer, and stream coordinator are identical in
 - Deterministic WHT rotation matrix -- same seed produces identical rotation on both backends
 - Tested across head_dim = {64, 128, 256}
 
-**Repository Structure**
-- Dependencies (llama-cpp-turboquant, turboquant_plus, tinygrad) converted to git submodules pinned to specific commits
+**Package Structure**
+- Python package (`tqbridge` v0.1.0) with `pyproject.toml`, installable via pip
+- 49 tests passing across wire protocol, compression pipeline, and smoke tests
+- Stub modules in place for DMA, bridge controller, thermal monitor, metrics, and kernel FFI (Metal + CUDA)
+
+**Wiki (LLM-maintained knowledge base)**
+- 5 concept pages, 3 entity pages, 9 ingested source documents with citations
+- Covers TurboQuant compression, cross-backend wire format, MLX cross-backend patterns, and key contributors
+
+**Repository Infrastructure**
+- Dependencies (llama-cpp-turboquant, turboquant_plus, tinygrad) tracked as git submodules pinned to specific commits
 
 ### What's Next -- Pending Hardware Validation
 
@@ -310,23 +319,32 @@ The compressed wire format, ring buffer, and stream coordinator are identical in
 ## Repository Structure
 
 ```
-src/tqbridge/                       # Bridge implementation (Python)
+src/tqbridge/                       # Bridge implementation (Python, v0.1.0)
   wire.py                           #   Wire header, CRC32, format negotiation
   compression.py                    #   PolarQuant + q8_0 compress/decompress
   dma.py                            #   DMA manager (stub -- needs hardware)
   bridge.py                         #   Bridge controller (stub -- needs hardware)
   thermal.py                        #   Thermal monitor (stub -- needs hardware)
   metrics.py                        #   Per-layer telemetry (stub)
-  kernels/                          #   ctypes FFI to Metal/CUDA kernels (stub)
+  kernels/                          #   ctypes FFI bindings
+    metal.py                        #     Metal TurboQuant kernels (stub)
+    cuda.py                         #     CUDA TurboQuant kernels (stub)
 tests/                              # 49 tests, all passing
   test_wire.py                      #   Wire protocol tests (19)
   test_compression.py               #   Compression pipeline tests (28)
   test_smoke.py                     #   Import and version tests (2)
 benchmarks/                         # Performance benchmarks (planned)
+pyproject.toml                      # Package config, deps: numpy, scipy
 docs/
   RFC-double-buffer-kv-bridge.md    # Compressed KV streaming bridge RFC
   RFC-double-buffer-kv-bridge.pdf   # PDF version with cover page and TOC
   RFC-metal-cuda-kv-bridge.md       # Multi-cluster heterogeneous inference RFC
+wiki/                               # LLM-maintained knowledge base
+  index.md                          #   Page catalog
+  log.md                            #   Chronological activity log
+  concepts/                         #   Technical concepts (5 pages)
+  entities/                         #   People and organisations (3 pages)
+  sources/                          #   Ingested source documents (9 pages)
 llama-cpp-turboquant/               # submodule: TheTom's Metal + CUDA kernels
 turboquant_plus/                    # submodule: benchmarks, papers, reference impl
 tinygrad/                           # submodule: tinygrad direct backend
