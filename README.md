@@ -244,36 +244,114 @@ The compressed wire format, ring buffer, and stream coordinator are identical in
 
 ## Project Status
 
-**Phase: Pre-hardware validation**
+**Phase: Active development -- bridge core implemented, pending hardware validation**
 
-The RFC is drafted, the architecture is designed, the test strategy is defined. Implementation is blocked on building the physical rig (M3 Ultra + RTX PRO 6000 in Razer Core X V2).
+### What's Done
 
-### Prerequisites
-- [ ] tinygrad micro-PR: Add RTX PRO 6000 Blackwell Max-Q PID to GB202 device table (`tinygrad/runtime/ops_nv.py:544`)
-- [ ] Build eGPU rig: RTX PRO 6000 + Razer Core X V2 + 650W+ ATX PSU
+**Planning & Architecture (completed 2026-04-05)**
+- PRD with functional requirements, acceptance criteria, and phased milestones
+- Architecture document with component design, data flow diagrams, and interface contracts
+- 25 stories across 6 epics decomposed from the RFCs and TheTom's review
+- TheTom (TurboQuant author) reviewed the RFC and provided key architectural input (2026-04-04)
 
-### Sprint 0 -- Hardware Validation (Go/No-Go Gates)
-- [ ] tinygrad enumerates RTX PRO 6000 via PCIIface/IOKit
-- [ ] TB5 sustained throughput >= 5 GB/s
-- [ ] turbo3/turbo4 compress/decompress on Metal (M3 Ultra)
-- [ ] turbo3/turbo4 compress/decompress on CUDA (RTX PRO 6000)
-- [ ] Lloyd-Max codebook consistency between Metal and CUDA implementations
+**Wire Protocol (`tqbridge.wire`) -- 19 tests passing**
+- Versioned 40-byte binary header with CRC32 integrity checking
+- `Format` enum: FP16, Q8_0, Q5_K_M, TURBO4, TURBO3, TURBO2
+- `encode_header()` / `decode_header()` with magic validation, version gating, CRC32
+- Format negotiation: defaults to asymmetric q8_0 K + turbo3 V (per TheTom recommendation)
+- CLI override support (`--fmt-k`, `--fmt-v`)
 
-### Implementation
-- [ ] Ring buffer for double-buffered KV streaming
-- [ ] KV stream coordinator using `KVCacheCompressor` API
-- [ ] Wire format: stripped turbo3/turbo4 blocks + layer header
-- [ ] Cross-backend round-trip integration tests
-- [ ] End-to-end benchmarks
+**Compression Pipeline (`tqbridge.compression`) -- 28 tests passing**
+- PolarQuant (TurboQuant without QJL): Haar-random rotation via QR decomposition, Lloyd-Max codebook, compact bit packing
+- turbo3 (3-bit, 4.6x), turbo4 (4-bit, 3.8x), turbo2 (2-bit, 6.4x) -- all validated
+- q8_0 (ggml-compatible 34-byte blocks) for high-precision Key compression
+- FP16 passthrough for uncompressed transfers
+- Asymmetric K/V: independent compression of Keys and Values in a single pipeline call
+- Deterministic WHT rotation matrix -- same seed produces identical rotation on both backends
+- Tested across head_dim = {64, 128, 256}
+
+**Repository Structure**
+- Dependencies (llama-cpp-turboquant, turboquant_plus, tinygrad) converted to git submodules pinned to specific commits
+
+### What's Next -- Pending Hardware Validation
+
+**Prerequisites (Epic 0)**
+- [ ] Pin submodules to TheTom's head_dim=256/512-fixed branches
+- [ ] Validate tinygrad PCIe enumeration of eGPU (vs USB-only discovery)
+- [ ] tinygrad micro-PR: RTX PRO 6000 Blackwell PID addition
+
+**DMA & Double-Buffer (Epic 3)**
+- [ ] Pinned staging buffer allocation (Metal `storageModeShared`)
+- [ ] DMA-direct transfers via IOKit (not tinygrad BufferCopy -- per TheTom recommendation)
+- [ ] Ping-pong double-buffer with fence synchronisation
+- [ ] Target: >= 90% DMA/compute overlap, >= 80% of TB5 ceiling
+
+**Bridge Controller (Epic 4)**
+- [ ] Full pipeline orchestration: compress -> DMA -> decompress
+- [ ] Hidden state passthrough (16 KB/token, no compression)
+- [ ] Thermal gate for eGPU enclosure (S0.6 power state)
+- [ ] Per-layer metrics and observability
+
+**End-to-End Validation (Epic 5)**
+- [ ] Single-layer decode across TB5
+- [ ] Llama 3 70B Q5_K_M split across M3 Ultra + RTX PRO 6000
+- [ ] Llama 3 405B Q4_K_M across 192 GB pool
+- [ ] CUDA decompress profiling under sustained load
+
+### Key Architecture Decisions (from TheTom Review)
+
+| Decision | Rationale |
+|----------|-----------|
+| **Asymmetric K/V** (q8_0 K + turbo3 V) | V errors scale linearly, K errors amplify through softmax |
+| **DMA-direct** over tinygrad BufferCopy | Ring buffer layout is performance-critical for sustained streaming |
+| **turbo3 validated at 128K+** | KL divergence does not drift with context; confirmed in production by Sjoerd Maessen |
+| **Pin to head_dim-fixed branches** | dk512 Metal FA and head_dim=256 rotation matrix bugs fixed in TheTom's latest |
 
 ## Repository Structure
 
 ```
+src/tqbridge/                       # Bridge implementation (Python)
+  wire.py                           #   Wire header, CRC32, format negotiation
+  compression.py                    #   PolarQuant + q8_0 compress/decompress
+  dma.py                            #   DMA manager (stub -- needs hardware)
+  bridge.py                         #   Bridge controller (stub -- needs hardware)
+  thermal.py                        #   Thermal monitor (stub -- needs hardware)
+  metrics.py                        #   Per-layer telemetry (stub)
+  kernels/                          #   ctypes FFI to Metal/CUDA kernels (stub)
+tests/                              # 49 tests, all passing
+  test_wire.py                      #   Wire protocol tests (19)
+  test_compression.py               #   Compression pipeline tests (28)
+  test_smoke.py                     #   Import and version tests (2)
+benchmarks/                         # Performance benchmarks (planned)
 docs/
-  RFC-metal-cuda-kv-bridge.md       # Parent RFC: hardware topology, layer assignment
-  RFC-double-buffer-kv-bridge.md    # This RFC: compressed KV streaming bridge
+  RFC-double-buffer-kv-bridge.md    # Compressed KV streaming bridge RFC
   RFC-double-buffer-kv-bridge.pdf   # PDF version with cover page and TOC
+  RFC-metal-cuda-kv-bridge.md       # Multi-cluster heterogeneous inference RFC
+llama-cpp-turboquant/               # submodule: TheTom's Metal + CUDA kernels
+turboquant_plus/                    # submodule: benchmarks, papers, reference impl
+tinygrad/                           # submodule: tinygrad direct backend
 ```
+
+## Wiki
+
+LLM-maintained knowledge base following [Karpathy's LLM Wiki pattern](https://github.com/karpathy/llm-wiki). The wiki compiles ecosystem research, benchmarks, and cross-references into persistent, interlinked pages.
+
+```
+wiki/
+  index.md              # Page catalog
+  log.md                # Chronological activity log
+  entities/             # People and organisations
+  concepts/             # Technical concepts and patterns
+  sources/              # Ingested source documents with citations
+```
+
+Browse from `wiki/index.md`. The LLM maintains all pages — humans curate sources and ask questions.
+
+## Dependency: Chronara Flywheel
+
+This project is a **direct dependency** of the [chronaracli flywheel](https://github.com/CG-8663/chronaracli) training pipeline. The flywheel uses the LLM Wiki pattern as a layer between raw interaction logs (Elasticsearch) and QLoRA fine-tuning on the GX10 cluster. The bridge provides the cross-device inference capacity the flywheel needs to train at scale.
+
+The wiki also serves as a **quality gate for bridge validation** — same sources ingested through Metal-only, CUDA-only, and split inference paths. Identical wiki output confirms compressed KV wire format doesn't degrade downstream quality.
 
 ## Key References
 
