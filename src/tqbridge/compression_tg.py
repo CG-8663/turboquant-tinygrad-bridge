@@ -221,10 +221,12 @@ class TinygradCompressor:
             Dict with compressed components (format-dependent).
         """
         orig_shape = tensor.shape
-        vectors = tensor.reshape(-1, self.head_dim)
-        n_elements = vectors.shape[0] * vectors.shape[1]
+        n_elements = 1
+        for s in orig_shape:
+            n_elements *= s
 
         if fmt in _FORMAT_BITS:
+            vectors = tensor.reshape(-1, self.head_dim)
             norms, indices = polar_compress(
                 vectors, _FORMAT_BITS[fmt], self.head_dim, self.seed
             )
