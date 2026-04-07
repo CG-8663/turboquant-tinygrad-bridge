@@ -10,6 +10,7 @@ Supports both sequential and pipelined (double-buffer) modes.
 
 from __future__ import annotations
 
+import os
 import threading
 
 from tinygrad import Tensor, Device
@@ -31,10 +32,14 @@ class KVBridge:
         seed: int = 42,
         src_device: str = "METAL",
         dst_device: str = "NV",
+        beam: int | None = None,
     ):
         self.head_dim = head_dim
         self.fmt_k = fmt_k
         self.fmt_v = fmt_v
+        self.beam = beam
+        if beam is not None:
+            os.environ["JITBEAM"] = str(beam)
         self.compressor = TinygradCompressor(head_dim=head_dim, seed=seed)
         self.dma = DMAManager(src_device=src_device, dst_device=dst_device)
         self.src_device = src_device

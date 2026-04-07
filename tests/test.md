@@ -242,7 +242,6 @@ for _ in range(warmup):
 
 `baseline_compute.py`'s `_timed()` helper does sync warmup correctly. But `baseline_device.py` has inline warmup loops that don't sync.
 
-**Mitigation:**
 - Add `_ = b.numpy()` or `Device['METAL'].synchronize()` in warmup loops
 - Or refactor `baseline_device.py` to use a shared `_timed()` helper
 

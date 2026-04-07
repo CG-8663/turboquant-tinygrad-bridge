@@ -4,6 +4,7 @@ Tests marked @pytest.mark.hardware require both Metal and NV devices live.
 Run with: pytest tests/test_bridge.py -m hardware
 """
 
+import os
 import pytest
 import numpy as np
 
@@ -286,3 +287,148 @@ class TestMetrics:
         pipeline = PipelineMetrics()
         assert pipeline.total_time_ms == 0.0
         assert "No layers" in pipeline.summary()
+
+    def test_overlap_efficiency(self):
+        pipeline = PipelineMetrics()
+        pipeline.add(TransferMetrics(0, 1, 2, 1, 4096, 1024))
+        pipeline.add(TransferMetrics(1, 1, 2, 1, 4096, 1024))
+        # Sum of parts = 8ms, simulate wall time of 5ms (overlap)
+        pipeline.wall_time_ms = 5.0
+        assert pipeline.overlap_efficiency == pytest.approx(1.6)
+        assert "wall" in pipeline.summary()
+        assert "overlap" in pipeline.summary()
+
+
+# ---------------------------------------------------------------------------
+# JITBEAM tests
+# ---------------------------------------------------------------------------
+
+class TestJITBEAM:
+    def test_beam_sets_env(self):
+        """KVBridge(beam=2) should set JITBEAM env var."""
+        old = os.environ.pop("JITBEAM", None)
+        try:
+            bridge = KVBridge(beam=2, src_device="METAL", dst_device="METAL")
+            assert os.environ.get("JITBEAM") == "2"
+            assert bridge.beam == 2
+        finally:
+            if old is not None:
+                os.environ["JITBEAM"] = old
+            else:
+                os.environ.pop("JITBEAM", None)
+
+    def test_beam_none_no_env(self):
+        """KVBridge(beam=None) should not touch JITBEAM env var."""
+        old = os.environ.pop("JITBEAM", None)
+        try:
+            bridge = KVBridge(beam=None, src_device="METAL", dst_device="METAL")
+            assert "JITBEAM" not in os.environ
+            assert bridge.beam is None
+        finally:
+            if old is not None:
+                os.environ["JITBEAM"] = old
+
+    @hardware
+    def test_beam_transfer(self):
+        """JITBEAM=2 bridge should produce valid results (may be slower on first run)."""
+        bridge = KVBridge(head_dim=128, fmt_k=Format.Q8_0, fmt_v=Format.TURBO3, beam=2)
+
+        k = Tensor.rand(8, 128, device="METAL").realize()
+        v = Tensor.rand(8, 128, device="METAL").realize()
+
+        k_out, v_out, metrics = bridge.transfer_layer(k, v)
+        assert k_out.device == "NV"
+        assert v_out.device == "NV"
+        assert metrics.compression_ratio > 1.0
+
+
+# ---------------------------------------------------------------------------
+# Thermal monitor tests
+# ---------------------------------------------------------------------------
+
+from tqbridge.thermal import (
+    ThermalPressure, ThermalSnapshot, ThermalMonitor, read_thermal,
+)
+
+
+class TestThermalSnapshot:
+    def test_nominal_not_throttled(self):
+        snap = ThermalSnapshot(
+            timestamp=0.0,
+            metal_gpu_power_mw=5000,
+            metal_pressure=ThermalPressure.NOMINAL,
+        )
+        assert not snap.is_throttled
+
+    def test_serious_is_throttled(self):
+        snap = ThermalSnapshot(
+            timestamp=0.0,
+            metal_pressure=ThermalPressure.SERIOUS,
+        )
+        assert snap.is_throttled
+
+    def test_critical_is_throttled(self):
+        snap = ThermalSnapshot(
+            timestamp=0.0,
+            metal_pressure=ThermalPressure.CRITICAL,
+        )
+        assert snap.is_throttled
+
+    def test_nv_high_temp_throttled(self):
+        snap = ThermalSnapshot(
+            timestamp=0.0,
+            nv_temp_c=90.0,
+        )
+        assert snap.is_throttled
+
+    def test_nv_normal_temp_ok(self):
+        snap = ThermalSnapshot(
+            timestamp=0.0,
+            nv_temp_c=65.0,
+        )
+        assert not snap.is_throttled
+
+    def test_summary_metal(self):
+        snap = ThermalSnapshot(
+            timestamp=0.0,
+            metal_gpu_power_mw=1245,
+            metal_pressure=ThermalPressure.NOMINAL,
+        )
+        s = snap.summary()
+        assert "Metal GPU" in s
+        assert "1245" in s
+        assert "Nominal" in s
+
+    def test_summary_nv(self):
+        snap = ThermalSnapshot(timestamp=0.0, nv_temp_c=72.0)
+        assert "72" in snap.summary()
+
+    def test_summary_empty(self):
+        snap = ThermalSnapshot(timestamp=0.0)
+        assert snap.summary() == "No thermal data"
+
+
+class TestThermalMonitor:
+    def test_start_stop(self):
+        """Monitor should start and stop cleanly."""
+        mon = ThermalMonitor(interval_s=0.1)
+        mon.start()
+        assert mon._thread is not None
+        assert mon._thread.is_alive()
+        mon.stop()
+        assert mon._thread is None
+
+    def test_not_throttled_initially(self):
+        mon = ThermalMonitor()
+        assert not mon.is_throttled
+
+    def test_wait_if_not_throttled(self):
+        """wait_if_throttled returns immediately when not throttled."""
+        mon = ThermalMonitor()
+        assert mon.wait_if_throttled(timeout_s=0.1)
+
+    def test_read_thermal_returns_snapshot(self):
+        """read_thermal() should return a ThermalSnapshot (even without sudo)."""
+        snap = read_thermal()
+        assert isinstance(snap, ThermalSnapshot)
+        assert snap.timestamp > 0
