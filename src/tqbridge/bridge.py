@@ -6,6 +6,7 @@ Orchestrates the end-to-end pipeline:
 3. Decompress on destination device (NV)
 
 Supports both sequential and pipelined (double-buffer) modes.
+Thermal monitoring with throttle gating and optional CLI display.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from tinygrad import Tensor, Device
 from tqbridge.compression_tg import TinygradCompressor
 from tqbridge.dma import DMAManager, RingBuffer
 from tqbridge.metrics import Timer, TransferMetrics, PipelineMetrics
+from tqbridge.thermal import ThermalMonitor, print_thermal_header, print_thermal_row, print_thermal_footer
 from tqbridge.wire import Format
 
 
@@ -33,17 +35,44 @@ class KVBridge:
         src_device: str = "METAL",
         dst_device: str = "NV",
         beam: int | None = None,
+        thermal: bool = False,
+        thermal_interval_s: float = 2.0,
+        temp_limit_c: float = 85.0,
+        show_thermal: bool = False,
     ):
         self.head_dim = head_dim
         self.fmt_k = fmt_k
         self.fmt_v = fmt_v
         self.beam = beam
+        self.show_thermal = show_thermal
         if beam is not None:
             os.environ["JITBEAM"] = str(beam)
         self.compressor = TinygradCompressor(head_dim=head_dim, seed=seed)
         self.dma = DMAManager(src_device=src_device, dst_device=dst_device)
         self.src_device = src_device
         self.dst_device = dst_device
+
+        # Thermal monitor
+        self.thermal_monitor: ThermalMonitor | None = None
+        if thermal or show_thermal:
+            self.thermal_monitor = ThermalMonitor(
+                interval_s=thermal_interval_s,
+                temp_limit_c=temp_limit_c,
+            )
+            self.thermal_monitor.start()
+
+    def close(self) -> None:
+        """Stop thermal monitor."""
+        if self.thermal_monitor is not None:
+            self.thermal_monitor.stop()
+
+    def __del__(self):
+        self.close()
+
+    def _thermal_gate(self) -> None:
+        """Block if thermal throttle is active."""
+        if self.thermal_monitor is not None:
+            self.thermal_monitor.wait_if_throttled()
 
     def transfer_layer(
         self,
@@ -61,6 +90,8 @@ class KVBridge:
         Returns:
             (k_out, v_out, metrics) where k_out/v_out are on dst_device
         """
+        self._thermal_gate()
+
         n_elements = 1
         for s in k_cache.shape:
             n_elements *= s
@@ -121,8 +152,13 @@ class KVBridge:
         k_out_layers = []
         v_out_layers = []
 
+        if self.show_thermal:
+            print_thermal_header()
+
         with Timer() as t_wall:
             for layer_idx in layer_range:
+                self._thermal_gate()
+
                 # Extract single layer: (n_heads, seq_len, head_dim)
                 k_layer = k_cache[layer_idx].realize()
                 v_layer = v_cache[layer_idx].realize()
@@ -139,7 +175,19 @@ class KVBridge:
                 v_out_layers.append(v_out.reshape(*orig_shape))
                 pipeline.add(metrics)
 
+                if self.show_thermal:
+                    snap = self.thermal_monitor.latest if self.thermal_monitor else None
+                    print_thermal_row(
+                        layer_idx, metrics.compress_time_ms, metrics.transfer_time_ms,
+                        metrics.decompress_time_ms, metrics.compression_ratio, snap,
+                    )
+
         pipeline.wall_time_ms = t_wall.ms
+
+        if self.show_thermal:
+            snap = self.thermal_monitor.latest if self.thermal_monitor else None
+            print_thermal_footer(pipeline.summary(), snap)
+
         return k_out_layers, v_out_layers, pipeline
 
     def transfer_kv_cache_pipelined(
@@ -174,9 +222,14 @@ class KVBridge:
         results: dict[int, tuple[Tensor, Tensor]] = {}
         producer_error: list[Exception] = []
 
+        if self.show_thermal:
+            print_thermal_header()
+
         def _producer():
             try:
                 for layer_idx in layers:
+                    self._thermal_gate()
+
                     k_layer = k_cache[layer_idx].realize()
                     v_layer = v_cache[layer_idx].realize()
                     orig_shape = k_layer.shape
@@ -240,20 +293,32 @@ class KVBridge:
                     v_out.reshape(*item["orig_shape"]),
                 )
 
-                pipeline.add(TransferMetrics(
+                metrics = TransferMetrics(
                     layer_idx=layer_idx,
                     compress_time_ms=item["compress_ms"],
                     transfer_time_ms=item["transfer_ms"],
                     decompress_time_ms=t_decompress.ms,
                     original_bytes=item["original_bytes"],
                     compressed_bytes=item["compressed_bytes"],
-                ))
+                )
+                pipeline.add(metrics)
+
+                if self.show_thermal:
+                    snap = self.thermal_monitor.latest if self.thermal_monitor else None
+                    print_thermal_row(
+                        layer_idx, metrics.compress_time_ms, metrics.transfer_time_ms,
+                        metrics.decompress_time_ms, metrics.compression_ratio, snap,
+                    )
 
             producer.join()
             if producer_error:
                 raise producer_error[0]
 
         pipeline.wall_time_ms = t_wall.ms
+
+        if self.show_thermal:
+            snap = self.thermal_monitor.latest if self.thermal_monitor else None
+            print_thermal_footer(pipeline.summary(), snap)
 
         # Return in layer order
         k_out_layers = [results[i][0] for i in layers]

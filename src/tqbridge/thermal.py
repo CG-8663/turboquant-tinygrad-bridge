@@ -2,20 +2,16 @@
 
 Supports:
 - Metal (M3 Ultra): powermetrics GPU power + thermal pressure (requires sudo)
-- NV eGPU: nvidia-smi (Linux) or powermetrics proxy (macOS, no direct sensor)
+- NV eGPU: direct GPU die temp via tinygrad RM control (GSP thermal sensor)
+- NV fallback: nvidia-smi (Linux only)
 - Polling: background thread samples at configurable interval
 - Gating: pause transfers when temperature exceeds threshold
-
-On macOS with an NV eGPU over TB5, there is no nvidia-smi. We rely on:
-1. powermetrics thermal pressure level (Nominal/Fair/Serious/Critical)
-2. GPU power draw as a proxy for thermal load
-3. Future: direct MMIO thermal register read via tinygrad's PCIIface
 """
 
 from __future__ import annotations
 
-import platform
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -62,6 +58,10 @@ class ThermalSnapshot:
         return " | ".join(parts)
 
 
+# ---------------------------------------------------------------------------
+# Metal thermal (powermetrics)
+# ---------------------------------------------------------------------------
+
 def _read_powermetrics(timeout_s: float = 3.0) -> ThermalSnapshot:
     """Read Metal GPU power and thermal pressure via powermetrics (requires sudo)."""
     snap = ThermalSnapshot(timestamp=time.monotonic())
@@ -72,13 +72,11 @@ def _read_powermetrics(timeout_s: float = 3.0) -> ThermalSnapshot:
         )
         for line in result.stdout.splitlines():
             if line.startswith("GPU Power:"):
-                # "GPU Power: 1245 mW"
                 try:
                     snap.metal_gpu_power_mw = float(line.split(":")[1].strip().split()[0])
                 except (ValueError, IndexError):
                     pass
             elif "pressure level:" in line:
-                # "Current pressure level: Nominal"
                 level_str = line.split(":")[-1].strip()
                 try:
                     snap.metal_pressure = ThermalPressure(level_str)
@@ -89,8 +87,52 @@ def _read_powermetrics(timeout_s: float = 3.0) -> ThermalSnapshot:
     return snap
 
 
+# ---------------------------------------------------------------------------
+# NV thermal (tinygrad RM control via GSP)
+# ---------------------------------------------------------------------------
+
+def _read_nv_rm_thermal() -> float | None:
+    """Read NV GPU die temperature via tinygrad RM control (GSP thermal sensor).
+
+    Uses NV2080_CTRL_CMD_THERMAL_SYSTEM_EXECUTE_V2_PHYSICAL to query sensor 0
+    (GPU die) through the GPU System Processor. Works on macOS eGPU where
+    nvidia-smi is unavailable.
+
+    Returns temperature in Celsius, or None if unavailable.
+    """
+    try:
+        from tinygrad import Device
+        from tinygrad.runtime.autogen import nv_580 as nv_gpu
+
+        dev = Device["NV"]
+
+        params = nv_gpu.NV2080_CTRL_THERMAL_SYSTEM_EXECUTE_V2_PARAMS(
+            clientAPIVersion=2,
+            clientAPIRevision=0,
+            clientInstructionSizeOf=44,
+            executeFlags=nv_gpu.NV2080_CTRL_THERMAL_SYSTEM_EXECUTE_FLAGS_IGNORE_FAIL,
+            instructionListSize=1,
+        )
+        params.instructionList[0].opcode = (
+            nv_gpu.NV2080_CTRL_THERMAL_SYSTEM_GET_STATUS_SENSOR_READING_OPCODE
+        )
+        params.instructionList[0].operands.getStatusSensorReading.sensorIndex = 0
+
+        result = dev.iface.rm_control(
+            dev.subdevice,
+            nv_gpu.NV2080_CTRL_CMD_THERMAL_SYSTEM_EXECUTE_V2_PHYSICAL,
+            params,
+        )
+
+        if result.successfulInstructions >= 1:
+            return float(result.instructionList[0].operands.getStatusSensorReading.value)
+    except Exception:
+        pass
+    return None
+
+
 def _read_nvidia_smi(timeout_s: float = 3.0) -> tuple[float | None, float | None]:
-    """Read NV GPU temp and power via nvidia-smi (Linux only)."""
+    """Read NV GPU temp and power via nvidia-smi (Linux fallback)."""
     try:
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=temperature.gpu,power.draw", "--format=csv,noheader,nounits"],
@@ -106,17 +148,30 @@ def _read_nvidia_smi(timeout_s: float = 3.0) -> tuple[float | None, float | None
     return None, None
 
 
+# ---------------------------------------------------------------------------
+# Combined read
+# ---------------------------------------------------------------------------
+
 def read_thermal() -> ThermalSnapshot:
     """Read thermal state from all available sources."""
     snap = _read_powermetrics()
 
-    # Try nvidia-smi for NV device (works on Linux, not macOS eGPU)
-    nv_temp, nv_power = _read_nvidia_smi()
-    snap.nv_temp_c = nv_temp
-    snap.nv_gpu_power_mw = nv_power
+    # Try tinygrad RM control first (works on macOS eGPU)
+    nv_temp = _read_nv_rm_thermal()
+    if nv_temp is not None:
+        snap.nv_temp_c = nv_temp
+    else:
+        # Fallback to nvidia-smi (Linux)
+        nv_temp, nv_power = _read_nvidia_smi()
+        snap.nv_temp_c = nv_temp
+        snap.nv_gpu_power_mw = nv_power
 
     return snap
 
+
+# ---------------------------------------------------------------------------
+# Background monitor
+# ---------------------------------------------------------------------------
 
 class ThermalMonitor:
     """Background thermal polling with throttle gating.
@@ -137,10 +192,12 @@ class ThermalMonitor:
         interval_s: float = 2.0,
         temp_limit_c: float = 85.0,
         power_limit_mw: float = 50_000.0,
+        on_snapshot: callable | None = None,
     ):
         self.interval_s = interval_s
         self.temp_limit_c = temp_limit_c
         self.power_limit_mw = power_limit_mw
+        self.on_snapshot = on_snapshot
         self._latest: ThermalSnapshot = ThermalSnapshot(timestamp=time.monotonic())
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -190,6 +247,9 @@ class ThermalMonitor:
             else:
                 self._throttle_event.set()
 
+            if self.on_snapshot is not None:
+                self.on_snapshot(snap)
+
             self._stop.wait(timeout=self.interval_s)
 
     def _check_limits(self, snap: ThermalSnapshot) -> bool:
@@ -203,3 +263,42 @@ class ThermalMonitor:
         if snap.nv_gpu_power_mw is not None and snap.nv_gpu_power_mw >= self.power_limit_mw:
             return True
         return False
+
+
+# ---------------------------------------------------------------------------
+# CLI thermal display
+# ---------------------------------------------------------------------------
+
+def print_thermal_header() -> None:
+    """Print CLI thermal display header."""
+    print(f"{'Layer':>6} {'Compress':>10} {'Transfer':>10} {'Decomp':>10} "
+          f"{'Total':>8} {'Ratio':>6} {'Metal':>12} {'NV':>8} {'Status':>10}")
+    print("─" * 90)
+
+
+def print_thermal_row(
+    layer_idx: int,
+    compress_ms: float,
+    transfer_ms: float,
+    decompress_ms: float,
+    ratio: float,
+    snap: ThermalSnapshot | None,
+) -> None:
+    """Print one row of CLI thermal display."""
+    total_ms = compress_ms + transfer_ms + decompress_ms
+    metal_str = f"{snap.metal_gpu_power_mw:.0f} mW" if snap and snap.metal_gpu_power_mw is not None else "—"
+    nv_str = f"{snap.nv_temp_c:.0f}°C" if snap and snap.nv_temp_c is not None else "—"
+    status = "THROTTLED" if snap and snap.is_throttled else "OK"
+    print(f"{layer_idx:>6} {compress_ms:>9.1f}ms {transfer_ms:>9.1f}ms {decompress_ms:>9.1f}ms "
+          f"{total_ms:>7.1f}ms {ratio:>5.1f}x {metal_str:>12} {nv_str:>8} {status:>10}")
+
+
+def print_thermal_footer(
+    pipeline_summary: str,
+    snap: ThermalSnapshot | None,
+) -> None:
+    """Print CLI thermal display footer."""
+    print("─" * 90)
+    print(f"  Pipeline: {pipeline_summary}")
+    if snap:
+        print(f"  Thermal:  {snap.summary()}")

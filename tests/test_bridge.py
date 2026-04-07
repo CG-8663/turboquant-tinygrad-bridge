@@ -348,6 +348,7 @@ class TestJITBEAM:
 
 from tqbridge.thermal import (
     ThermalPressure, ThermalSnapshot, ThermalMonitor, read_thermal,
+    _read_nv_rm_thermal, print_thermal_header, print_thermal_row, print_thermal_footer,
 )
 
 
@@ -432,3 +433,118 @@ class TestThermalMonitor:
         snap = read_thermal()
         assert isinstance(snap, ThermalSnapshot)
         assert snap.timestamp > 0
+
+    def test_on_snapshot_callback(self):
+        """on_snapshot callback fires on each poll."""
+        snaps = []
+        mon = ThermalMonitor(interval_s=1.0, on_snapshot=lambda s: snaps.append(s))
+        mon.start()
+        import time; time.sleep(8.0)
+        mon.stop()
+        assert len(snaps) >= 2
+
+    @hardware
+    def test_nv_rm_thermal_reads_temp(self):
+        """NV RM control returns GPU die temperature (eGPU present)."""
+        temp = _read_nv_rm_thermal()
+        assert temp is not None, "Expected NV GPU temp from RM control"
+        assert 20 <= temp <= 110, f"NV temp {temp}°C out of reasonable range"
+        print(f"  NV GPU die temp: {temp}°C")
+
+    @hardware
+    def test_read_thermal_includes_nv(self):
+        """read_thermal() should populate nv_temp_c when NV device is present."""
+        snap = read_thermal()
+        assert snap.nv_temp_c is not None, "Expected NV temp in snapshot"
+        assert snap.nv_temp_c > 0
+
+
+# ---------------------------------------------------------------------------
+# CLI thermal display tests
+# ---------------------------------------------------------------------------
+
+class TestThermalCLI:
+    def test_print_header(self, capsys):
+        print_thermal_header()
+        out = capsys.readouterr().out
+        assert "Layer" in out
+        assert "Metal" in out
+        assert "NV" in out
+
+    def test_print_row(self, capsys):
+        snap = ThermalSnapshot(timestamp=0.0, metal_gpu_power_mw=2000,
+                               metal_pressure=ThermalPressure.NOMINAL, nv_temp_c=62.0)
+        print_thermal_row(0, 5.0, 10.0, 3.0, 4.6, snap)
+        out = capsys.readouterr().out
+        assert "62" in out
+        assert "2000" in out
+        assert "OK" in out
+
+    def test_print_row_throttled(self, capsys):
+        snap = ThermalSnapshot(timestamp=0.0, metal_pressure=ThermalPressure.CRITICAL, nv_temp_c=92.0)
+        print_thermal_row(5, 5.0, 10.0, 3.0, 4.6, snap)
+        out = capsys.readouterr().out
+        assert "THROTTLED" in out
+
+    def test_print_footer(self, capsys):
+        snap = ThermalSnapshot(timestamp=0.0, nv_temp_c=55.0)
+        print_thermal_footer("4 layers | 45 ms", snap)
+        out = capsys.readouterr().out
+        assert "Pipeline" in out
+        assert "Thermal" in out
+
+    def test_print_row_no_snap(self, capsys):
+        """CLI row with no thermal data should show dashes."""
+        print_thermal_row(0, 5.0, 10.0, 3.0, 4.6, None)
+        out = capsys.readouterr().out
+        assert "—" in out
+
+
+# ---------------------------------------------------------------------------
+# Bridge thermal integration tests
+# ---------------------------------------------------------------------------
+
+@hardware
+class TestBridgeThermalIntegration:
+    def test_bridge_with_thermal(self):
+        """Bridge with thermal=True should not crash and should have a monitor."""
+        bridge = KVBridge(head_dim=128, thermal=True, thermal_interval_s=0.5)
+        assert bridge.thermal_monitor is not None
+        assert bridge.thermal_monitor._thread is not None
+
+        k = Tensor.rand(8, 128, device="METAL").realize()
+        v = Tensor.rand(8, 128, device="METAL").realize()
+        k_out, v_out, metrics = bridge.transfer_layer(k, v)
+        assert k_out.device == "NV"
+        bridge.close()
+
+    def test_bridge_show_thermal(self, capsys):
+        """Bridge with show_thermal=True should print CLI output."""
+        n_layers, n_heads, seq_len, head_dim = 2, 2, 16, 128
+        bridge = KVBridge(head_dim=head_dim, show_thermal=True, thermal_interval_s=0.5)
+
+        k_cache = Tensor.rand(n_layers, n_heads, seq_len, head_dim, device="METAL").realize()
+        v_cache = Tensor.rand(n_layers, n_heads, seq_len, head_dim, device="METAL").realize()
+
+        _, _, pipeline = bridge.transfer_kv_cache(k_cache, v_cache)
+        bridge.close()
+
+        out = capsys.readouterr().out
+        assert "Layer" in out  # header
+        assert "Pipeline" in out  # footer
+        assert pipeline.total_time_ms > 0
+
+    def test_bridge_pipelined_show_thermal(self, capsys):
+        """Pipelined bridge with show_thermal should print CLI output."""
+        n_layers, n_heads, seq_len, head_dim = 2, 2, 16, 128
+        bridge = KVBridge(head_dim=head_dim, show_thermal=True, thermal_interval_s=0.5)
+
+        k_cache = Tensor.rand(n_layers, n_heads, seq_len, head_dim, device="METAL").realize()
+        v_cache = Tensor.rand(n_layers, n_heads, seq_len, head_dim, device="METAL").realize()
+
+        _, _, pipeline = bridge.transfer_kv_cache_pipelined(k_cache, v_cache)
+        bridge.close()
+
+        out = capsys.readouterr().out
+        assert "Layer" in out
+        assert "Pipeline" in out
