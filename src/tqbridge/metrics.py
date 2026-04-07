@@ -40,6 +40,7 @@ class PipelineMetrics:
     """Aggregate metrics across a multi-layer KV transfer."""
 
     layers: list[TransferMetrics] = field(default_factory=list)
+    wall_time_ms: float = 0.0
 
     def add(self, m: TransferMetrics) -> None:
         self.layers.append(m)
@@ -69,15 +70,25 @@ class PipelineMetrics:
             return 0.0
         return (self.total_original_bytes / 1e9) / (total_transfer_ms / 1e3)
 
+    @property
+    def overlap_efficiency(self) -> float:
+        """Ratio of sum-of-parts time to wall time. >1.0 means overlap is working."""
+        if self.wall_time_ms == 0:
+            return 0.0
+        return self.total_time_ms / self.wall_time_ms
+
     def summary(self) -> str:
         n = len(self.layers)
         if n == 0:
             return "No layers transferred"
-        return (
+        s = (
             f"{n} layers | {self.total_time_ms:.1f} ms total | "
             f"{self.avg_compression_ratio:.1f}x compression | "
             f"{self.avg_effective_bandwidth_gbps:.1f} GB/s effective"
         )
+        if self.wall_time_ms > 0:
+            s += f" | {self.wall_time_ms:.1f} ms wall | {self.overlap_efficiency:.2f}x overlap"
+        return s
 
 
 class Timer:

@@ -1,0 +1,24 @@
+[
+  {
+    "device": "NV",
+    "matmul_512_gflops": 201.9,
+    "matmul_1024_gflops": 1437.6,
+    "matmul_2048_gflops": 6749.7,
+    "matmul_4096_gflops": 10733.6,
+    "matmul_fp16_2048_gflops": 12482.5,
+    "matmul_fp16_4096_gflops": 63470.6,
+    "attn_score_gflops": 9364.8,
+    "attn_value_gflops": 11136.9,
+    "scan_1gb_gbs": 445.2,
+    "scan_4gb_gbs": 569.4,
+    "decode_tok_per_sec": 43.8,
+    "kv_gather_gbs": 71.3,
+    "chained_mlp_gflops": 1199.5,
+    "chained_mlp_ms": 28.6,
+    "prefill_gflops": 106489.2,
+    "prefill_ms": 10.3,
+    "max_kv_seq": 32768,
+    "max_kv_gb": 16.0,
+    "reduce_gbs": 165.4
+  }
+]

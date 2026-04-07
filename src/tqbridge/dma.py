@@ -3,10 +3,15 @@
 Wraps tinygrad's built-in cross-device transfer with timing instrumentation.
 The actual data path is CPU-mediated (copyin/copyout) through TB5 PCIe 4.0 x4.
 TurboQuant compression reduces the transfer payload by 4.6x, making the
-effective bandwidth ~28 GB/s vs ~6 GB/s raw.
+effective bandwidth ~23 GB/s vs ~6 GB/s raw.
+
+Includes a RingBuffer for double-buffered pipelined transfers.
 """
 
 from __future__ import annotations
+
+from queue import Queue
+from typing import Any
 
 from tinygrad import Tensor, Device
 
@@ -53,3 +58,34 @@ class DMAManager:
             else:
                 result[k] = v
         return result, total_ms
+
+
+_SENTINEL = object()
+
+
+class RingBuffer:
+    """Thread-safe ring buffer for pipelined layer transfers.
+
+    Producer pushes compressed+transferred payloads, consumer pops and
+    decompresses. The queue provides backpressure: producer blocks if
+    all slots are full, consumer blocks if empty.
+    """
+
+    def __init__(self, slots: int = 4):
+        self._queue: Queue[Any] = Queue(maxsize=slots)
+
+    def put(self, item: Any) -> None:
+        """Push an item (blocks if full)."""
+        self._queue.put(item)
+
+    def get(self) -> Any:
+        """Pop an item (blocks if empty). Returns _SENTINEL when done."""
+        return self._queue.get()
+
+    def done(self) -> None:
+        """Signal no more items will be produced."""
+        self._queue.put(_SENTINEL)
+
+    @staticmethod
+    def is_sentinel(item: Any) -> bool:
+        return item is _SENTINEL
