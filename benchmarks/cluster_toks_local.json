@@ -1,0 +1,22 @@
+{
+  "model": "qwen3-8b",
+  "n_layers": 32,
+  "n_kv_heads": 8,
+  "head_dim": 128,
+  "tokens": 50,
+  "toks_per_s": 65.18372246626707,
+  "median_ms": 15.21054200202343,
+  "best_ms": 14.640417000919115,
+  "node_results": {
+    "m3": {
+      "median_ms": 8.983584000816336,
+      "best_ms": 8.563791998312809,
+      "layers": 16
+    },
+    "rtx": {
+      "median_ms": 6.045333000656683,
+      "best_ms": 5.7500000002619345,
+      "layers": 16
+    }
+  }
+}
