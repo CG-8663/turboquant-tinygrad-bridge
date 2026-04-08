@@ -1,11 +1,12 @@
 """Bridge controller: compress -> DMA -> decompress pipeline for KV cache transfer.
 
 Orchestrates the end-to-end pipeline:
-1. Compress KV tensors on source device (Metal) using tinygrad ops
+1. Compress KV tensors on source device using tinygrad ops or native C
 2. Transfer compressed payload over TB5 via Tensor.to()
-3. Decompress on destination device (NV)
+3. Decompress on destination device
 
 Supports both sequential and pipelined (double-buffer) modes.
+Backend selection: "tinygrad" (on-device tensor ops) or "native" (C via ctypes).
 Thermal monitoring with throttle gating and optional CLI display.
 """
 
@@ -13,6 +14,7 @@ from __future__ import annotations
 
 import os
 import threading
+from typing import Literal
 
 from tinygrad import Tensor, Device
 
@@ -39,18 +41,27 @@ class KVBridge:
         thermal_interval_s: float = 2.0,
         temp_limit_c: float = 85.0,
         show_thermal: bool = False,
+        backend: Literal["tinygrad", "native"] = "tinygrad",
     ):
         self.head_dim = head_dim
         self.fmt_k = fmt_k
         self.fmt_v = fmt_v
         self.beam = beam
         self.show_thermal = show_thermal
+        self.backend = backend
         if beam is not None:
             os.environ["JITBEAM"] = str(beam)
         self.compressor = TinygradCompressor(head_dim=head_dim, seed=seed)
         self.dma = DMAManager(src_device=src_device, dst_device=dst_device)
         self.src_device = src_device
         self.dst_device = dst_device
+
+        # Native C compressor (lazy init — only loaded when backend="native")
+        self._native_compressor = None
+        self._seed = seed
+        if backend == "native":
+            from tqbridge.native import NativeCompressor
+            self._native_compressor = NativeCompressor(head_dim=head_dim, seed=seed)
 
         # Thermal monitor
         self.thermal_monitor: ThermalMonitor | None = None
@@ -62,9 +73,12 @@ class KVBridge:
             self.thermal_monitor.start()
 
     def close(self) -> None:
-        """Stop thermal monitor."""
+        """Stop thermal monitor and release native resources."""
         if self.thermal_monitor is not None:
             self.thermal_monitor.stop()
+        if self._native_compressor is not None:
+            self._native_compressor.close()
+            self._native_compressor = None
 
     def __del__(self):
         self.close()
@@ -92,6 +106,17 @@ class KVBridge:
         """
         self._thermal_gate()
 
+        if self.backend == "native":
+            return self._transfer_layer_native(k_cache, v_cache, layer_idx)
+        return self._transfer_layer_tinygrad(k_cache, v_cache, layer_idx)
+
+    def _transfer_layer_tinygrad(
+        self,
+        k_cache: Tensor,
+        v_cache: Tensor,
+        layer_idx: int,
+    ) -> tuple[Tensor, Tensor, TransferMetrics]:
+        """Compress/decompress via tinygrad tensor ops (on-device)."""
         n_elements = 1
         for s in k_cache.shape:
             n_elements *= s
@@ -116,6 +141,72 @@ class KVBridge:
         with Timer() as t_decompress:
             k_out = self.compressor.decompress(k_transferred)
             v_out = self.compressor.decompress(v_transferred)
+
+        metrics = TransferMetrics(
+            layer_idx=layer_idx,
+            compress_time_ms=t_compress.ms,
+            transfer_time_ms=transfer_ms,
+            decompress_time_ms=t_decompress.ms,
+            original_bytes=original_bytes,
+            compressed_bytes=compressed_bytes,
+        )
+
+        return k_out, v_out, metrics
+
+    def _transfer_layer_native(
+        self,
+        k_cache: Tensor,
+        v_cache: Tensor,
+        layer_idx: int,
+    ) -> tuple[Tensor, Tensor, TransferMetrics]:
+        """Compress/decompress via native C library (CPU path).
+
+        Flow: GPU→CPU (.numpy) → C compress → transfer bytes → C decompress → CPU→GPU
+        The C compress/decompress is much faster than tinygrad tensor ops,
+        offsetting the CPU round-trip cost for large tensors.
+        """
+        import numpy as np
+
+        orig_shape = k_cache.shape
+        n_elements = 1
+        for s in orig_shape:
+            n_elements *= s
+        original_bytes = n_elements * 4 * 2
+
+        nc = self._native_compressor
+
+        # Step 1: Pull to CPU and compress via C
+        with Timer() as t_compress:
+            k_np = k_cache.reshape(-1, self.head_dim).numpy()
+            v_np = v_cache.reshape(-1, self.head_dim).numpy()
+            k_comp = nc.compress(k_np, self.fmt_k)
+            v_comp = nc.compress(v_np, self.fmt_v)
+
+        compressed_bytes = (
+            nc.compressed_size_bytes(k_comp) + nc.compressed_size_bytes(v_comp)
+        )
+
+        # Step 2: Transfer compressed bytes as a tensor to destination device
+        # For native path, the compressed data is already CPU bytes.
+        # We transfer the raw bytes as a 1D tensor to the destination,
+        # then pull back to CPU for C decompression.
+        with Timer() as t_transfer:
+            # Minimal transfer: just move the compressed bytes over the bus
+            k_bytes_t = Tensor(k_comp["compressed_bytes"].astype(np.uint8)).to(self.dst_device).realize()
+            v_bytes_t = Tensor(v_comp["compressed_bytes"].astype(np.uint8)).to(self.dst_device).realize()
+            Device[self.dst_device].synchronize()
+        transfer_ms = t_transfer.ms
+
+        # Step 3: Decompress via C on destination side
+        with Timer() as t_decompress:
+            # Pull compressed bytes back to CPU for C decompression
+            k_comp["compressed_bytes"] = k_bytes_t.numpy().astype(np.uint8)
+            v_comp["compressed_bytes"] = v_bytes_t.numpy().astype(np.uint8)
+            k_result = nc.decompress(k_comp)
+            v_result = nc.decompress(v_comp)
+            # Push decompressed float32 to destination device
+            k_out = Tensor(k_result, device=self.dst_device).reshape(*orig_shape).realize()
+            v_out = Tensor(v_result, device=self.dst_device).reshape(*orig_shape).realize()
 
         metrics = TransferMetrics(
             layer_idx=layer_idx,
