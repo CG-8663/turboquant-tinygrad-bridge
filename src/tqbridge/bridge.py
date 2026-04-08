@@ -41,7 +41,7 @@ class KVBridge:
         thermal_interval_s: float = 2.0,
         temp_limit_c: float = 85.0,
         show_thermal: bool = False,
-        backend: Literal["tinygrad", "native"] = "tinygrad",
+        backend: Literal["tinygrad", "native", "cuda"] = "tinygrad",
     ):
         self.head_dim = head_dim
         self.fmt_k = fmt_k
@@ -58,10 +58,14 @@ class KVBridge:
 
         # Native C compressor (lazy init — only loaded when backend="native")
         self._native_compressor = None
+        self._cuda_compressor = None
         self._seed = seed
         if backend == "native":
             from tqbridge.native import NativeCompressor
             self._native_compressor = NativeCompressor(head_dim=head_dim, seed=seed)
+        elif backend == "cuda":
+            from tqbridge.kernels.cuda import CUDACompressor
+            self._cuda_compressor = CUDACompressor(head_dim=head_dim, seed=seed, device=dst_device)
 
         # Thermal monitor
         self.thermal_monitor: ThermalMonitor | None = None
@@ -79,6 +83,9 @@ class KVBridge:
         if self._native_compressor is not None:
             self._native_compressor.close()
             self._native_compressor = None
+        if self._cuda_compressor is not None:
+            self._cuda_compressor.close()
+            self._cuda_compressor = None
 
     def __del__(self):
         self.close()
@@ -131,6 +138,8 @@ class KVBridge:
 
         if self.backend == "native":
             return self._transfer_layer_native(k_cache, v_cache, layer_idx)
+        elif self.backend == "cuda":
+            return self._transfer_layer_cuda(k_cache, v_cache, layer_idx)
         return self._transfer_layer_tinygrad(k_cache, v_cache, layer_idx)
 
     def _transfer_layer_tinygrad(
@@ -242,6 +251,71 @@ class KVBridge:
 
         return k_out, v_out, metrics
 
+    def _transfer_layer_cuda(
+        self,
+        k_cache: Tensor,
+        v_cache: Tensor,
+        layer_idx: int,
+    ) -> tuple[Tensor, Tensor, TransferMetrics]:
+        """Compress on Metal via tinygrad, transfer, decompress on NV via CUDA kernels.
+
+        Flow: Metal compress (tinygrad) → TB5 transfer (norms+indices) → NV decompress (CUDA)
+        Best of both worlds: Metal's fast tinygrad compress + NV's CUDA kernel decompress.
+        """
+        from tqbridge.wire import Format
+
+        orig_shape = k_cache.shape
+        n_elements = 1
+        for s in orig_shape:
+            n_elements *= s
+        original_bytes = n_elements * 4 * 2
+
+        cuda = self._cuda_compressor
+        _FMT_BITS = {Format.TURBO2: 2, Format.TURBO3: 3, Format.TURBO4: 4}
+
+        # Step 1: Compress on source (Metal) via tinygrad
+        with Timer() as t_compress:
+            k_compressed = self.compressor.compress(k_cache, self.fmt_k)
+            v_compressed = self.compressor.compress(v_cache, self.fmt_v)
+
+        compressed_bytes = (
+            self.compressor.compressed_size_bytes(k_compressed)
+            + self.compressor.compressed_size_bytes(v_compressed)
+        )
+
+        # Step 2: Transfer compressed components to NV
+        k_transferred, k_ms = self.dma.transfer_dict(k_compressed)
+        v_transferred, v_ms = self.dma.transfer_dict(v_compressed)
+        transfer_ms = k_ms + v_ms
+
+        # Step 3: Decompress on NV
+        # For PolarQuant formats, use CUDA kernels; for Q8_0/FP16, use tinygrad
+        with Timer() as t_decompress:
+            if self.fmt_k in _FMT_BITS:
+                k_out = cuda.decompress(
+                    k_transferred["norms"], k_transferred["indices"], self.fmt_k
+                ).reshape(*orig_shape)
+            else:
+                k_out = self.compressor.decompress(k_transferred)
+
+            if self.fmt_v in _FMT_BITS:
+                v_out = cuda.decompress(
+                    v_transferred["norms"], v_transferred["indices"], self.fmt_v
+                ).reshape(*orig_shape)
+            else:
+                v_out = self.compressor.decompress(v_transferred)
+
+        metrics = TransferMetrics(
+            layer_idx=layer_idx,
+            compress_time_ms=t_compress.ms,
+            transfer_time_ms=transfer_ms,
+            decompress_time_ms=t_decompress.ms,
+            original_bytes=original_bytes,
+            compressed_bytes=compressed_bytes,
+        )
+
+        return k_out, v_out, metrics
+
     def transfer_kv_cache(
         self,
         k_cache: Tensor,
@@ -303,6 +377,111 @@ class KVBridge:
             print_thermal_footer(pipeline.summary(), snap)
 
         return k_out_layers, v_out_layers, pipeline
+
+    def transfer_kv_bulk(
+        self,
+        k_cache: Tensor,
+        v_cache: Tensor,
+    ) -> tuple[Tensor, Tensor, TransferMetrics]:
+        """Bulk transfer: flatten all layers, compress once, transfer once, decompress once.
+
+        This is the high-throughput path for per-token decode where all layers
+        are updated simultaneously. Avoids per-layer overhead entirely.
+
+        Args:
+            k_cache: shape (n_layers, n_heads, seq_len, head_dim) on src
+            v_cache: shape (n_layers, n_heads, seq_len, head_dim) on src
+
+        Returns:
+            (k_out, v_out, metrics) with original shapes on dst_device
+        """
+        self._thermal_gate()
+
+        orig_shape = k_cache.shape
+        n_elements = 1
+        for s in orig_shape:
+            n_elements *= s
+        original_bytes = n_elements * 4 * 2
+
+        # Flatten entire KV cache to (total_vectors, head_dim)
+        k_flat = k_cache.reshape(-1, self.head_dim)
+        v_flat = v_cache.reshape(-1, self.head_dim)
+
+        if self.backend == "cuda":
+            return self._bulk_cuda(k_flat, v_flat, orig_shape, original_bytes)
+
+        # Tinygrad path: compress, transfer, decompress — all as single ops
+        with Timer() as t_compress:
+            k_comp = self.compressor.compress(k_flat, self.fmt_k)
+            v_comp = self.compressor.compress(v_flat, self.fmt_v)
+
+        compressed_bytes = (
+            self.compressor.compressed_size_bytes(k_comp)
+            + self.compressor.compressed_size_bytes(v_comp)
+        )
+
+        k_xfer, k_ms = self.dma.transfer_dict(k_comp)
+        v_xfer, v_ms = self.dma.transfer_dict(v_comp)
+        transfer_ms = k_ms + v_ms
+
+        with Timer() as t_decompress:
+            k_out = self.compressor.decompress(k_xfer).reshape(*orig_shape)
+            v_out = self.compressor.decompress(v_xfer).reshape(*orig_shape)
+
+        return k_out, v_out, TransferMetrics(
+            layer_idx=0, compress_time_ms=t_compress.ms,
+            transfer_time_ms=transfer_ms, decompress_time_ms=t_decompress.ms,
+            original_bytes=original_bytes, compressed_bytes=compressed_bytes,
+        )
+
+    def _bulk_cuda(
+        self,
+        k_flat: Tensor,
+        v_flat: Tensor,
+        orig_shape: tuple,
+        original_bytes: int,
+    ) -> tuple[Tensor, Tensor, TransferMetrics]:
+        """Bulk transfer with CUDA kernel decompress on NV."""
+        from tqbridge.wire import Format
+        _FMT_BITS = {Format.TURBO2: 2, Format.TURBO3: 3, Format.TURBO4: 4}
+        cuda = self._cuda_compressor
+
+        # Compress on Metal via tinygrad
+        with Timer() as t_compress:
+            k_comp = self.compressor.compress(k_flat, self.fmt_k)
+            v_comp = self.compressor.compress(v_flat, self.fmt_v)
+
+        compressed_bytes = (
+            self.compressor.compressed_size_bytes(k_comp)
+            + self.compressor.compressed_size_bytes(v_comp)
+        )
+
+        # Transfer compressed components to NV
+        k_xfer, k_ms = self.dma.transfer_dict(k_comp)
+        v_xfer, v_ms = self.dma.transfer_dict(v_comp)
+        transfer_ms = k_ms + v_ms
+
+        # Decompress on NV via CUDA kernels
+        with Timer() as t_decompress:
+            if self.fmt_k in _FMT_BITS:
+                k_out = cuda.decompress(
+                    k_xfer["norms"], k_xfer["indices"], self.fmt_k
+                ).reshape(*orig_shape)
+            else:
+                k_out = self.compressor.decompress(k_xfer).reshape(*orig_shape)
+
+            if self.fmt_v in _FMT_BITS:
+                v_out = cuda.decompress(
+                    v_xfer["norms"], v_xfer["indices"], self.fmt_v
+                ).reshape(*orig_shape)
+            else:
+                v_out = self.compressor.decompress(v_xfer).reshape(*orig_shape)
+
+        return k_out, v_out, TransferMetrics(
+            layer_idx=0, compress_time_ms=t_compress.ms,
+            transfer_time_ms=transfer_ms, decompress_time_ms=t_decompress.ms,
+            original_bytes=original_bytes, compressed_bytes=compressed_bytes,
+        )
 
     def transfer_kv_cache_pipelined(
         self,
