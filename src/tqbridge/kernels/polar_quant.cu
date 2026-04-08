@@ -1,32 +1,25 @@
 /**
- * polar_quant.cu — CUDA kernels for PolarQuant compress/decompress.
+ * polar_quant.cu — Optimized CUDA kernels for PolarQuant compress/decompress.
  *
- * These kernels run the hot path on GPU, eliminating the CPU round-trip
- * that the native C backend requires. The rotation matrix and codebook
- * are kept in GPU memory.
+ * HEAD_DIM and N_BOUNDARIES are #defined at compile time for each format.
+ * All parameters are passed as GPU buffers — no scalar kernel arguments,
+ * since tinygrad's HCQ dispatch doesn't support raw CUDA scalar params.
  *
- * Kernel layout:
- *   compress: 1 thread per vector (each thread does rotation + quantization)
- *   decompress: 1 thread per vector (each thread does lookup + inverse rotation)
- *
- * For head_dim=128, each thread does 128x128 dot products — compute-bound,
- * so parallelism across vectors gives the speedup.
+ * Layout: 1 block per vector, HEAD_DIM threads per block.
  */
+
+#ifndef HEAD_DIM
+#define HEAD_DIM 128
+#endif
+
+#ifndef N_BOUNDARIES
+#define N_BOUNDARIES 7
+#endif
 
 extern "C" {
 
 /**
- * PolarQuant compress: norm extraction → rotation → quantization → pack norms + indices.
- *
- * Args:
- *   input:      (n_vectors, head_dim) float32, source vectors
- *   rotation:   (head_dim, head_dim) float32, precomputed orthogonal rotation matrix
- *   boundaries: (n_boundaries,) float32, quantization boundaries
- *   norms_out:  (n_vectors,) float32, extracted norms
- *   indices_out:(n_vectors, head_dim) uint8, quantized indices
- *   n_vectors:  number of vectors
- *   head_dim:   dimension per vector
- *   n_boundaries: number of quantization boundaries (2^bit_width - 1)
+ * params[0] = n_vectors
  */
 __global__ void polar_compress_kernel(
     const float* __restrict__ input,
@@ -34,56 +27,60 @@ __global__ void polar_compress_kernel(
     const float* __restrict__ boundaries,
     float* __restrict__ norms_out,
     unsigned char* __restrict__ indices_out,
-    int n_vectors,
-    int head_dim,
-    int n_boundaries
+    const int* __restrict__ params
 ) {
-    int vid = blockIdx.x * blockDim.x + threadIdx.x;
+    int vid = blockIdx.x;
+    int n_vectors = params[0];
     if (vid >= n_vectors) return;
+    int tid = threadIdx.x;
 
-    const float* vec = input + vid * head_dim;
+    const float* vec = input + vid * HEAD_DIM;
 
-    // Step 1: Extract norm
-    float norm_sq = 0.0f;
-    for (int i = 0; i < head_dim; i++) {
-        norm_sq += vec[i] * vec[i];
-    }
-    float norm = sqrtf(norm_sq);
-    float safe_norm = (norm > 0.0f) ? norm : 1.0f;
-    norms_out[vid] = norm;
+    /* Load vector into shared memory */
+    __shared__ float s_vec[HEAD_DIM];
+    __shared__ float s_reduce[HEAD_DIM];
+    s_vec[tid] = vec[tid];
+    __syncthreads();
 
-    // Step 2: Rotate (y = R @ (vec / norm))
-    // Step 3: Quantize (searchsorted on boundaries)
-    unsigned char* idx_out = indices_out + vid * head_dim;
-    for (int i = 0; i < head_dim; i++) {
-        // Compute rotated component: dot(rotation[i], vec/norm)
-        float y = 0.0f;
-        const float* R_row = rotation + i * head_dim;
-        for (int j = 0; j < head_dim; j++) {
-            y += R_row[j] * (vec[j] / safe_norm);
+    /* Cooperative norm via tree reduction */
+    s_reduce[tid] = s_vec[tid] * s_vec[tid];
+    __syncthreads();
+    for (int stride = HEAD_DIM / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            s_reduce[tid] += s_reduce[tid + stride];
         }
-
-        // Quantize: find bucket via linear scan of boundaries
-        int idx = 0;
-        for (int b = 0; b < n_boundaries; b++) {
-            if (y >= boundaries[b]) idx = b + 1;
-            else break;
-        }
-        idx_out[i] = (unsigned char)idx;
+        __syncthreads();
     }
+
+    float norm = sqrtf(s_reduce[0]);
+    float inv_norm = (norm > 0.0f) ? (1.0f / norm) : 1.0f;
+
+    if (tid == 0) {
+        norms_out[vid] = norm;
+    }
+
+    /* Rotate: y[tid] = dot(R[tid], vec * inv_norm) */
+    const float* R_row = rotation + tid * HEAD_DIM;
+    float y = 0.0f;
+    for (int j = 0; j < HEAD_DIM; j++) {
+        y += R_row[j] * s_vec[j];
+    }
+    y *= inv_norm;
+
+    /* Quantize */
+    int idx = 0;
+    for (int b = 0; b < N_BOUNDARIES; b++) {
+        if (y >= boundaries[b]) {
+            idx = b + 1;
+        } else {
+            break;
+        }
+    }
+    indices_out[vid * HEAD_DIM + tid] = (unsigned char)idx;
 }
 
 /**
- * PolarQuant decompress: codebook lookup → inverse rotation → rescale.
- *
- * Args:
- *   norms:      (n_vectors,) float32, norms from compress
- *   indices:    (n_vectors, head_dim) uint8, quantized indices
- *   rotation:   (head_dim, head_dim) float32, rotation matrix (uses R^T)
- *   codebook:   (n_centroids,) float32, codebook values
- *   output:     (n_vectors, head_dim) float32, reconstructed vectors
- *   n_vectors:  number of vectors
- *   head_dim:   dimension per vector
+ * params[0] = n_vectors
  */
 __global__ void polar_decompress_kernel(
     const float* __restrict__ norms,
@@ -91,26 +88,27 @@ __global__ void polar_decompress_kernel(
     const float* __restrict__ rotation,
     const float* __restrict__ codebook,
     float* __restrict__ output,
-    int n_vectors,
-    int head_dim
+    const int* __restrict__ params
 ) {
-    int vid = blockIdx.x * blockDim.x + threadIdx.x;
+    int vid = blockIdx.x;
+    int n_vectors = params[0];
     if (vid >= n_vectors) return;
+    int tid = threadIdx.x;
 
-    float norm = norms[vid];
-    const unsigned char* idx = indices + vid * head_dim;
-    float* out = output + vid * head_dim;
+    const unsigned char* idx = indices + vid * HEAD_DIM;
 
-    // Inverse rotation: x_hat[i] = sum_j(R[j][i] * codebook[idx[j]])
-    // This is R^T @ y_hat, computed as: for each output dim i,
-    // dot product of column i of R with codebook-looked-up values.
-    for (int i = 0; i < head_dim; i++) {
-        float val = 0.0f;
-        for (int j = 0; j < head_dim; j++) {
-            val += rotation[j * head_dim + i] * codebook[idx[j]];
-        }
-        out[i] = val * norm;
+    /* Load codebook-looked-up values into shared memory */
+    __shared__ float s_y_hat[HEAD_DIM];
+    s_y_hat[tid] = codebook[idx[tid]];
+    __syncthreads();
+
+    /* Inverse rotation: x_hat[tid] = dot(column tid of R, y_hat) */
+    float val = 0.0f;
+    for (int j = 0; j < HEAD_DIM; j++) {
+        val += rotation[j * HEAD_DIM + tid] * s_y_hat[j];
     }
+
+    output[vid * HEAD_DIM + tid] = val * norms[vid];
 }
 
-} // extern "C"
+} /* extern "C" */

@@ -22,7 +22,7 @@ _FORMAT_BITS = {
     Format.TURBO4: 4,
 }
 
-_KERNEL_SRC = (Path(__file__).parent / "polar_quant.cu").read_text()
+_KERNEL_SRC_TEMPLATE = (Path(__file__).parent / "polar_quant.cu").read_text()
 
 
 class CUDAKernelError(RuntimeError):
@@ -35,6 +35,11 @@ class CUDACompressor:
 
     Keeps rotation matrices and codebooks in GPU VRAM. Compress and decompress
     operate entirely on-device with no CPU round-trip.
+
+    Kernels are compiled per (head_dim, bit_width) pair with HEAD_DIM and
+    N_BOUNDARIES baked in as #defines. Scalar parameters (n_vectors) are
+    passed via a GPU buffer since tinygrad's HCQ doesn't support raw CUDA
+    scalar kernel arguments.
 
     Usage:
         compressor = CUDACompressor(head_dim=128, seed=42)
@@ -50,28 +55,44 @@ class CUDACompressor:
         self.seed = seed
         self.device = device
 
-        # Compile CUDA kernels
         try:
-            dev = Device[device]
-            self._compiler = dev.compiler
-            self._lib = self._compiler.compile(_KERNEL_SRC)
-            self._dev = dev
+            self._dev = Device[device]
         except Exception as e:
-            raise CUDAKernelError(f"Failed to compile CUDA kernels: {e}") from e
+            raise CUDAKernelError(f"Failed to access device {device}: {e}") from e
 
-        # Cache compiled programs and GPU-resident tables per format
+        # Cache compiled libs, programs, and GPU-resident tables per format
+        self._libs: dict[int, bytes] = {}
         self._programs: dict[str, object] = {}
         self._gpu_rotation: dict[int, Tensor] = {}
         self._gpu_codebook: dict[int, Tensor] = {}
         self._gpu_boundaries: dict[int, Tensor] = {}
 
+    def _compile_for_format(self, bit_width: int) -> bytes:
+        """Compile kernels with HEAD_DIM and N_BOUNDARIES baked in."""
+        if bit_width in self._libs:
+            return self._libs[bit_width]
+
+        n_boundaries = (1 << bit_width) - 1
+        src = f"#define HEAD_DIM {self.head_dim}\n#define N_BOUNDARIES {n_boundaries}\n" + _KERNEL_SRC_TEMPLATE
+
+        try:
+            lib = self._dev.compiler.compile(src)
+        except Exception as e:
+            raise CUDAKernelError(f"Failed to compile CUDA kernels: {e}") from e
+
+        self._libs[bit_width] = lib
+        return lib
+
     def _ensure_tables(self, fmt: Format):
-        """Lazily load rotation matrix and codebook to GPU for a format."""
+        """Lazily compile kernels and load rotation/codebook to GPU for a format."""
         from tinygrad import Tensor
 
         bit_width = _FORMAT_BITS[fmt]
         if bit_width in self._gpu_rotation:
             return
+
+        # Compile kernels for this format
+        self._compile_for_format(bit_width)
 
         rotation = _get_rotation(self.head_dim, self.seed).astype(np.float32)
         codebook = _get_codebook(bit_width, self.head_dim).astype(np.float32)
@@ -106,13 +127,13 @@ class CUDACompressor:
         norms = Tensor.empty(n_vectors, device=self.device).realize()
         indices = Tensor.empty(n_vectors, self.head_dim, device=self.device).cast(dtypes.uint8).realize()
 
-        # Launch kernel
-        block = 256
-        grid = (n_vectors + block - 1) // block
+        # Pack scalar params into GPU buffer
+        params = Tensor(np.array([n_vectors], dtype=np.int32), device=self.device).realize()
 
-        self._launch("polar_compress_kernel", grid, block,
-                      vectors, rotation, boundaries, norms, indices,
-                      n_vectors, self.head_dim, n_boundaries)
+        # Launch: 1 block per vector, head_dim threads per block
+        lib = self._libs[bit_width]
+        self._launch("polar_compress_kernel", lib, n_vectors, self.head_dim,
+                      vectors, rotation, boundaries, norms, indices, params)
 
         return norms, indices
 
@@ -138,41 +159,34 @@ class CUDACompressor:
 
         output = Tensor.empty(n_vectors, self.head_dim, device=self.device).realize()
 
-        block = 256
-        grid = (n_vectors + block - 1) // block
+        params = Tensor(np.array([n_vectors], dtype=np.int32), device=self.device).realize()
 
-        self._launch("polar_decompress_kernel", grid, block,
-                      norms, indices, rotation, codebook, output,
-                      n_vectors, self.head_dim)
+        lib = self._libs[bit_width]
+        self._launch("polar_decompress_kernel", lib, n_vectors, self.head_dim,
+                      norms, indices, rotation, codebook, output, params)
 
         return output
 
-    def _launch(self, kernel_name: str, grid: int, block: int, *args):
-        """Launch a compiled CUDA kernel with the given arguments.
+    def _launch(self, kernel_name: str, lib: bytes, grid: int, block: int, *tensor_args):
+        """Launch a compiled CUDA kernel with the given tensor arguments.
 
-        Tensor args are passed as device buffers; int args as kernel values.
+        All arguments must be tinygrad Tensors (passed as device buffers).
+        Scalar parameters must be packed into a Tensor buffer by the caller.
         """
         from tinygrad import Tensor
         from tinygrad.runtime.ops_nv import NVProgram
 
         bufs = []
-        vals = []
-        for a in args:
-            if isinstance(a, Tensor):
-                a.realize()
-                buf = a._buffer()
-                bufs.append(buf._buf)
-            elif isinstance(a, int):
-                vals.append(a)
-            else:
-                raise TypeError(f"Unsupported kernel arg type: {type(a)}")
+        for a in tensor_args:
+            a.realize()
+            bufs.append(a._buffer()._buf)
 
-        if kernel_name not in self._programs:
-            self._programs[kernel_name] = NVProgram(self._dev, kernel_name, self._lib)
+        cache_key = (kernel_name, id(lib))
+        if cache_key not in self._programs:
+            self._programs[cache_key] = NVProgram(self._dev, kernel_name, lib)
 
-        prg = self._programs[kernel_name]
-        prg(*bufs, global_size=(grid * block, 1, 1), local_size=(block, 1, 1),
-            vals=tuple(vals))
+        prg = self._programs[cache_key]
+        prg(*bufs, global_size=(grid, 1, 1), local_size=(block, 1, 1))
 
     def close(self):
         """Release GPU resources."""
