@@ -1,0 +1,77 @@
+{
+  "config": {
+    "layers": 4,
+    "heads": 4,
+    "seq_len": 32,
+    "head_dim": 128,
+    "data_mb": 0.524288
+  },
+  "results": {
+    "tinygrad": {
+      "cold": {
+        "label": "tinygrad cold (no warmup)",
+        "wall_ms": 512.7346250010305,
+        "pipeline_total_ms": 510.74820599751547,
+        "avg_compress_ms": 99.51019775053283,
+        "avg_transfer_ms": 3.678176998619165,
+        "avg_decompress_ms": 24.498676750226878,
+        "avg_ratio": 5.446808510638298,
+        "n_layers": 4
+      },
+      "warm_median": {
+        "label": "tinygrad warm (median of 3)",
+        "wall_ms": 42.06262499792501,
+        "pipeline_total_ms": 39.98604298976716,
+        "avg_compress_ms": 5.3362710004876135,
+        "avg_transfer_ms": 1.6704067475075135,
+        "avg_decompress_ms": 2.989832999446662,
+        "avg_ratio": 5.446808510638298,
+        "n_layers": 4
+      },
+      "post_warmup": {
+        "label": "tinygrad post-warmup (1st)",
+        "wall_ms": 44.75533299773815,
+        "pipeline_total_ms": 42.836540003918344,
+        "avg_compress_ms": 5.6440937505612965,
+        "avg_transfer_ms": 1.9051767503697192,
+        "avg_decompress_ms": 3.1598645000485703,
+        "avg_ratio": 5.446808510638298,
+        "n_layers": 4
+      },
+      "warmup_ms": 294.7286250018806
+    },
+    "native": {
+      "cold": {
+        "label": "native cold (no warmup)",
+        "wall_ms": 44.17791599917109,
+        "pipeline_total_ms": 42.43662500084611,
+        "avg_compress_ms": 4.242791500473686,
+        "avg_transfer_ms": 2.4006664998523775,
+        "avg_decompress_ms": 3.965698249885463,
+        "avg_ratio": 5.446808510638298,
+        "n_layers": 4
+      },
+      "warm_median": {
+        "label": "native warm (median of 3)",
+        "wall_ms": 27.436291999038076,
+        "pipeline_total_ms": 25.55866600232548,
+        "avg_compress_ms": 1.6517499998371932,
+        "avg_transfer_ms": 1.0306040003342787,
+        "avg_decompress_ms": 3.7073125004098983,
+        "avg_ratio": 5.446808510638298,
+        "n_layers": 4
+      },
+      "post_warmup": {
+        "label": "native post-warmup (1st)",
+        "wall_ms": 26.3701250005397,
+        "pipeline_total_ms": 24.77304299827665,
+        "avg_compress_ms": 1.6349792495020665,
+        "avg_transfer_ms": 0.9788232500795857,
+        "avg_decompress_ms": 3.5794582499875105,
+        "avg_ratio": 5.446808510638298,
+        "n_layers": 4
+      },
+      "warmup_ms": 16.78879099927144
+    }
+  }
+}
