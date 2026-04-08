@@ -1,0 +1,32 @@
+{
+  "model": "qwen3-8b",
+  "n_layers": 32,
+  "n_kv_heads": 8,
+  "head_dim": 128,
+  "tokens": 50,
+  "toks_per_s": 52.79395275116034,
+  "median_ms": 18.906666999100707,
+  "best_ms": 18.246500003442634,
+  "node_results": {
+    "m3": {
+      "median_ms": 8.992957998998463,
+      "best_ms": 8.6262920012814,
+      "layers": 8
+    },
+    "gx10-001": {
+      "median_ms": 0,
+      "best_ms": 0,
+      "layers": 8
+    },
+    "gx10-002": {
+      "median_ms": 0,
+      "best_ms": 0,
+      "layers": 8
+    },
+    "rtx": {
+      "median_ms": 6.079916995076928,
+      "best_ms": 5.778833001386374,
+      "layers": 8
+    }
+  }
+}
