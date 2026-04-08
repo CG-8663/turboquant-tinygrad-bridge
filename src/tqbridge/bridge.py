@@ -331,156 +331,103 @@ class KVBridge:
             layer_range = range(n_layers)
         layers = list(layer_range)
 
+        # tinygrad is not thread-safe: its SQLite disk cache and device access
+        # both fail in non-main threads. For the tinygrad backend, pipelined
+        # mode uses the sequential path (still benefits from kernel caching).
+        # Only the native backend can truly pipeline with threads (C code is
+        # thread-safe, no tinygrad device access needed for compress/decompress).
+        if self.backend != "native":
+            return self.transfer_kv_cache(k_cache, v_cache, layer_range)
+
         ring = RingBuffer(slots=ring_slots)
         pipeline = PipelineMetrics()
         results: dict[int, tuple[Tensor, Tensor]] = {}
-        producer_error: list[Exception] = []
+        consumer_error: list[Exception] = []
 
         if self.show_thermal:
             print_thermal_header()
 
-        def _producer_tinygrad():
-            try:
-                for layer_idx in layers:
-                    self._thermal_gate()
-
-                    k_layer = k_cache[layer_idx].realize()
-                    v_layer = v_cache[layer_idx].realize()
-                    orig_shape = k_layer.shape
-                    k_flat = k_layer.reshape(-1, self.head_dim)
-                    v_flat = v_layer.reshape(-1, self.head_dim)
-
-                    n_elements = 1
-                    for s in k_flat.shape:
-                        n_elements *= s
-                    original_bytes = n_elements * 4 * 2
-
-                    with Timer() as t_compress:
-                        k_comp = self.compressor.compress(k_flat, self.fmt_k)
-                        v_comp = self.compressor.compress(v_flat, self.fmt_v)
-
-                    compressed_bytes = (
-                        self.compressor.compressed_size_bytes(k_comp)
-                        + self.compressor.compressed_size_bytes(v_comp)
-                    )
-
-                    k_xfer, k_ms = self.dma.transfer_dict(k_comp)
-                    v_xfer, v_ms = self.dma.transfer_dict(v_comp)
-
-                    ring.put({
-                        "layer_idx": layer_idx,
-                        "k_xfer": k_xfer,
-                        "v_xfer": v_xfer,
-                        "orig_shape": orig_shape,
-                        "compress_ms": t_compress.ms,
-                        "transfer_ms": k_ms + v_ms,
-                        "original_bytes": original_bytes,
-                        "compressed_bytes": compressed_bytes,
-                        "backend": "tinygrad",
-                    })
-            except Exception as e:
-                producer_error.append(e)
-            finally:
-                ring.done()
-
-        def _producer_native():
+        def _decompress_worker():
+            """Consumer thread: C decompress + push to GPU."""
             try:
                 nc = self._native_compressor
-                for layer_idx in layers:
-                    self._thermal_gate()
+                while True:
+                    item = ring.get()
+                    if RingBuffer.is_sentinel(item):
+                        break
 
-                    k_layer = k_cache[layer_idx].realize()
-                    v_layer = v_cache[layer_idx].realize()
-                    orig_shape = k_layer.shape
-
-                    n_elements = 1
-                    for s in orig_shape:
-                        n_elements *= s
-                    original_bytes = n_elements * 4 * 2
-
-                    # Pull to CPU and compress via C
-                    with Timer() as t_compress:
-                        k_np = k_layer.reshape(-1, self.head_dim).numpy()
-                        v_np = v_layer.reshape(-1, self.head_dim).numpy()
-                        k_comp = nc.compress(k_np, self.fmt_k)
-                        v_comp = nc.compress(v_np, self.fmt_v)
-
-                    compressed_bytes = (
-                        nc.compressed_size_bytes(k_comp)
-                        + nc.compressed_size_bytes(v_comp)
-                    )
-
-                    # Native path: compressed bytes stay on CPU through the ring.
-                    # No GPU transfer here — consumer decompresses on CPU then
-                    # pushes decompressed float32 to the destination device.
-                    ring.put({
-                        "layer_idx": layer_idx,
-                        "k_comp": k_comp,
-                        "v_comp": v_comp,
-                        "orig_shape": orig_shape,
-                        "compress_ms": t_compress.ms,
-                        "transfer_ms": 0.0,
-                        "original_bytes": original_bytes,
-                        "compressed_bytes": compressed_bytes,
-                        "backend": "native",
-                    })
-            except Exception as e:
-                producer_error.append(e)
-            finally:
-                ring.done()
-
-        _producer = _producer_native if self.backend == "native" else _producer_tinygrad
-
-        # Start producer thread
-        producer = threading.Thread(target=_producer, daemon=True)
-
-        with Timer() as t_wall:
-            producer.start()
-
-            # Consumer: decompress on destination device (main thread)
-            while True:
-                item = ring.get()
-                if RingBuffer.is_sentinel(item):
-                    break
-
-                if item["backend"] == "native":
-                    nc = self._native_compressor
                     with Timer() as t_decompress:
                         k_result = nc.decompress(item["k_comp"])
                         v_result = nc.decompress(item["v_comp"])
                         k_out = Tensor(k_result, device=self.dst_device).reshape(*item["orig_shape"]).realize()
                         v_out = Tensor(v_result, device=self.dst_device).reshape(*item["orig_shape"]).realize()
-                else:
-                    with Timer() as t_decompress:
-                        k_out = self.compressor.decompress(item["k_xfer"])
-                        v_out = self.compressor.decompress(item["v_xfer"])
 
-                layer_idx = item["layer_idx"]
-                results[layer_idx] = (
-                    k_out.reshape(*item["orig_shape"]),
-                    v_out.reshape(*item["orig_shape"]),
-                )
+                    layer_idx = item["layer_idx"]
+                    results[layer_idx] = (k_out, v_out)
 
-                metrics = TransferMetrics(
-                    layer_idx=layer_idx,
-                    compress_time_ms=item["compress_ms"],
-                    transfer_time_ms=item["transfer_ms"],
-                    decompress_time_ms=t_decompress.ms,
-                    original_bytes=item["original_bytes"],
-                    compressed_bytes=item["compressed_bytes"],
-                )
-                pipeline.add(metrics)
-
-                if self.show_thermal:
-                    snap = self.thermal_monitor.latest if self.thermal_monitor else None
-                    print_thermal_row(
-                        layer_idx, metrics.compress_time_ms, metrics.transfer_time_ms,
-                        metrics.decompress_time_ms, metrics.compression_ratio, snap,
+                    metrics = TransferMetrics(
+                        layer_idx=layer_idx,
+                        compress_time_ms=item["compress_ms"],
+                        transfer_time_ms=0.0,
+                        decompress_time_ms=t_decompress.ms,
+                        original_bytes=item["original_bytes"],
+                        compressed_bytes=item["compressed_bytes"],
                     )
+                    pipeline.add(metrics)
 
-            producer.join()
-            if producer_error:
-                raise producer_error[0]
+                    if self.show_thermal:
+                        snap = self.thermal_monitor.latest if self.thermal_monitor else None
+                        print_thermal_row(
+                            layer_idx, metrics.compress_time_ms, 0.0,
+                            metrics.decompress_time_ms, metrics.compression_ratio, snap,
+                        )
+            except Exception as e:
+                consumer_error.append(e)
+
+        consumer = threading.Thread(target=_decompress_worker, daemon=True)
+
+        with Timer() as t_wall:
+            consumer.start()
+
+            # Producer (main thread): pull to CPU, C compress, push to ring
+            nc = self._native_compressor
+            for layer_idx in layers:
+                self._thermal_gate()
+
+                k_layer = k_cache[layer_idx].realize()
+                v_layer = v_cache[layer_idx].realize()
+                orig_shape = k_layer.shape
+
+                n_elements = 1
+                for s in orig_shape:
+                    n_elements *= s
+                original_bytes = n_elements * 4 * 2
+
+                with Timer() as t_compress:
+                    k_np = k_layer.reshape(-1, self.head_dim).numpy()
+                    v_np = v_layer.reshape(-1, self.head_dim).numpy()
+                    k_comp = nc.compress(k_np, self.fmt_k)
+                    v_comp = nc.compress(v_np, self.fmt_v)
+
+                compressed_bytes = (
+                    nc.compressed_size_bytes(k_comp)
+                    + nc.compressed_size_bytes(v_comp)
+                )
+
+                ring.put({
+                    "layer_idx": layer_idx,
+                    "k_comp": k_comp,
+                    "v_comp": v_comp,
+                    "orig_shape": orig_shape,
+                    "compress_ms": t_compress.ms,
+                    "original_bytes": original_bytes,
+                    "compressed_bytes": compressed_bytes,
+                })
+
+            ring.done()
+            consumer.join()
+            if consumer_error:
+                raise consumer_error[0]
 
         pipeline.wall_time_ms = t_wall.ms
 

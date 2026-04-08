@@ -91,6 +91,11 @@ def _read_powermetrics(timeout_s: float = 3.0) -> ThermalSnapshot:
 # NV thermal (tinygrad RM control via GSP)
 # ---------------------------------------------------------------------------
 
+_nv_thermal_lock = threading.Lock()
+_nv_dev_cache = None
+_nv_last_temp: float | None = None
+
+
 def _read_nv_rm_thermal() -> float | None:
     """Read NV GPU die temperature via tinygrad RM control (GSP thermal sensor).
 
@@ -98,13 +103,24 @@ def _read_nv_rm_thermal() -> float | None:
     (GPU die) through the GPU System Processor. Works on macOS eGPU where
     nvidia-smi is unavailable.
 
+    Non-blocking: if the NV device is busy (e.g. during a pipelined transfer),
+    returns the last known temperature instead of blocking.
+
     Returns temperature in Celsius, or None if unavailable.
     """
+    global _nv_dev_cache, _nv_last_temp
+
+    # Non-blocking acquire — if device is busy with transfers, skip this read
+    if not _nv_thermal_lock.acquire(blocking=False):
+        return _nv_last_temp
+
     try:
         from tinygrad import Device
         from tinygrad.runtime.autogen import nv_580 as nv_gpu
 
-        dev = Device["NV"]
+        if _nv_dev_cache is None:
+            _nv_dev_cache = Device["NV"]
+        dev = _nv_dev_cache
 
         params = nv_gpu.NV2080_CTRL_THERMAL_SYSTEM_EXECUTE_V2_PARAMS(
             clientAPIVersion=2,
@@ -125,10 +141,13 @@ def _read_nv_rm_thermal() -> float | None:
         )
 
         if result.successfulInstructions >= 1:
-            return float(result.instructionList[0].operands.getStatusSensorReading.value)
+            _nv_last_temp = float(result.instructionList[0].operands.getStatusSensorReading.value)
+            return _nv_last_temp
     except Exception:
         pass
-    return None
+    finally:
+        _nv_thermal_lock.release()
+    return _nv_last_temp
 
 
 def _read_nvidia_smi(timeout_s: float = 3.0) -> tuple[float | None, float | None]:
