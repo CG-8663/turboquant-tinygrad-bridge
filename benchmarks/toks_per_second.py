@@ -149,6 +149,10 @@ def main():
             backend=backend, seed=42,
         )
 
+        # Pre-allocate CUDA buffers for the expected shape
+        if backend == "cuda":
+            bridge.warmup(n_heads=n_kv_heads, seq_len=1, n_layers=n_layers)
+
         res = bench_toks(bridge, n_layers, n_kv_heads, head_dim, args.tokens)
         bridge.close()
 

@@ -60,12 +60,13 @@ class CUDACompressor:
         except Exception as e:
             raise CUDAKernelError(f"Failed to access device {device}: {e}") from e
 
-        # Cache compiled libs, programs, and GPU-resident tables per format
+        # Cache compiled libs, programs, GPU-resident tables, and pre-allocated buffers
         self._libs: dict[int, bytes] = {}
         self._programs: dict[str, object] = {}
         self._gpu_rotation: dict[int, Tensor] = {}
         self._gpu_codebook: dict[int, Tensor] = {}
         self._gpu_boundaries: dict[int, Tensor] = {}
+        self._prealloc: dict[tuple, dict] = {}
 
     def _compile_for_format(self, bit_width: int) -> bytes:
         """Compile kernels with HEAD_DIM and N_BOUNDARIES baked in."""
@@ -102,6 +103,36 @@ class CUDACompressor:
         self._gpu_codebook[bit_width] = Tensor(codebook, device=self.device).realize()
         self._gpu_boundaries[bit_width] = Tensor(boundaries, device=self.device).realize()
 
+    def preallocate(self, n_vectors: int, fmt: Format = Format.TURBO3):
+        """Pre-allocate all GPU buffers for a fixed vector count.
+
+        Call once at init to eliminate per-token allocation overhead.
+        Each Tensor.empty().realize() costs ~1ms over the eGPU link.
+        Pre-allocating removes 4+ sync round-trips per token.
+
+        Args:
+            n_vectors: number of vectors (e.g. n_layers * n_kv_heads * seq_len)
+            fmt: compression format
+        """
+        from tinygrad import Tensor, dtypes
+
+        self._ensure_tables(fmt)
+        bit_width = _FORMAT_BITS[fmt]
+        key = (bit_width, n_vectors)
+
+        if key in self._prealloc:
+            return
+
+        norms = Tensor.empty(n_vectors, device=self.device).realize()
+        indices = Tensor.empty(n_vectors, self.head_dim, device=self.device).cast(dtypes.uint8).realize()
+        output = Tensor.empty(n_vectors, self.head_dim, device=self.device).realize()
+        params = Tensor(np.array([n_vectors], dtype=np.int32), device=self.device).realize()
+
+        self._prealloc[key] = {
+            "norms": norms, "indices": indices,
+            "output": output, "params": params,
+        }
+
     def compress(self, vectors, fmt: Format = Format.TURBO3):
         """Compress float32 vectors on GPU using CUDA kernels.
 
@@ -117,20 +148,22 @@ class CUDACompressor:
 
         self._ensure_tables(fmt)
         bit_width = _FORMAT_BITS[fmt]
-
         n_vectors = vectors.shape[0]
+        key = (bit_width, n_vectors)
+
         rotation = self._gpu_rotation[bit_width]
         boundaries = self._gpu_boundaries[bit_width]
-        n_boundaries = boundaries.shape[0]
 
-        # Allocate output buffers
-        norms = Tensor.empty(n_vectors, device=self.device).realize()
-        indices = Tensor.empty(n_vectors, self.head_dim, device=self.device).cast(dtypes.uint8).realize()
+        # Use pre-allocated buffers if available, else allocate
+        if key in self._prealloc:
+            norms = self._prealloc[key]["norms"]
+            indices = self._prealloc[key]["indices"]
+            params = self._prealloc[key]["params"]
+        else:
+            norms = Tensor.empty(n_vectors, device=self.device).realize()
+            indices = Tensor.empty(n_vectors, self.head_dim, device=self.device).cast(dtypes.uint8).realize()
+            params = Tensor(np.array([n_vectors], dtype=np.int32), device=self.device).realize()
 
-        # Pack scalar params into GPU buffer
-        params = Tensor(np.array([n_vectors], dtype=np.int32), device=self.device).realize()
-
-        # Launch: 1 block per vector, head_dim threads per block
         lib = self._libs[bit_width]
         self._launch("polar_compress_kernel", lib, n_vectors, self.head_dim,
                       vectors, rotation, boundaries, norms, indices, params)
@@ -152,14 +185,18 @@ class CUDACompressor:
 
         self._ensure_tables(fmt)
         bit_width = _FORMAT_BITS[fmt]
-
         n_vectors = norms.shape[0]
+        key = (bit_width, n_vectors)
+
         rotation = self._gpu_rotation[bit_width]
         codebook = self._gpu_codebook[bit_width]
 
-        output = Tensor.empty(n_vectors, self.head_dim, device=self.device).realize()
-
-        params = Tensor(np.array([n_vectors], dtype=np.int32), device=self.device).realize()
+        if key in self._prealloc:
+            output = self._prealloc[key]["output"]
+            params = self._prealloc[key]["params"]
+        else:
+            output = Tensor.empty(n_vectors, self.head_dim, device=self.device).realize()
+            params = Tensor(np.array([n_vectors], dtype=np.int32), device=self.device).realize()
 
         lib = self._libs[bit_width]
         self._launch("polar_decompress_kernel", lib, n_vectors, self.head_dim,

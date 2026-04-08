@@ -1,0 +1,59 @@
+{
+  "model": "qwen3-8b",
+  "config": {
+    "n_layers": 32,
+    "n_kv_heads": 8,
+    "head_dim": 128
+  },
+  "tokens": 100,
+  "results": {
+    "tinygrad (Q8_0 K + TURBO3 V)": {
+      "toks_per_s": 47.86054490911846,
+      "wall_s": 2.089403707999736,
+      "per_token_ms": 10.511292000956018,
+      "n_tokens": 100,
+      "kv_bytes_per_token": 262144,
+      "raw_bw_gbps": 0.01254635468465595
+    },
+    "tinygrad (TURBO3 symmetric)": {
+      "toks_per_s": 49.309328355105485,
+      "wall_s": 2.0280138329981128,
+      "per_token_ms": 10.68302099884022,
+      "n_tokens": 100,
+      "kv_bytes_per_token": 262144,
+      "raw_bw_gbps": 0.012926144572320773
+    },
+    "native C (Q8_0 K + TURBO3 V)": {
+      "toks_per_s": 47.966837662383526,
+      "wall_s": 2.084773666003457,
+      "per_token_ms": 10.927770998023334,
+      "n_tokens": 100,
+      "kv_bytes_per_token": 262144,
+      "raw_bw_gbps": 0.012574218692167866
+    },
+    "native C (TURBO3 symmetric)": {
+      "toks_per_s": 48.14313820016391,
+      "wall_s": 2.0771392090027803,
+      "per_token_ms": 11.165645999426488,
+      "n_tokens": 100,
+      "kv_bytes_per_token": 262144,
+      "raw_bw_gbps": 0.012620434820343768
+    },
+    "CUDA kernels (Q8_0 K + TURBO3 V)": {
+      "toks_per_s": 52.58883551688089,
+      "wall_s": 1.9015442919990164,
+      "per_token_ms": 9.022020998600055,
+      "n_tokens": 100,
+      "kv_bytes_per_token": 262144,
+      "raw_bw_gbps": 0.013785847697737224
+    },
+    "CUDA kernels (TURBO3 symmetric)": {
+      "toks_per_s": 58.944378389885884,
+      "wall_s": 1.6965146250004182,
+      "per_token_ms": 7.1694585003569955,
+      "n_tokens": 100,
+      "kv_bytes_per_token": 262144,
+      "raw_bw_gbps": 0.015451915128638246
+    }
+  }
+}
