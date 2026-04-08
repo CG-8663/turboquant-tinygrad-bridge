@@ -384,7 +384,6 @@ class KVBridge:
                 ring.done()
 
         def _producer_native():
-            import numpy as np
             try:
                 nc = self._native_compressor
                 for layer_idx in layers:
@@ -411,21 +410,16 @@ class KVBridge:
                         + nc.compressed_size_bytes(v_comp)
                     )
 
-                    # Transfer compressed bytes to destination
-                    with Timer() as t_transfer:
-                        k_bytes_t = Tensor(k_comp["compressed_bytes"].astype(np.uint8)).to(self.dst_device).realize()
-                        v_bytes_t = Tensor(v_comp["compressed_bytes"].astype(np.uint8)).to(self.dst_device).realize()
-                        Device[self.dst_device].synchronize()
-
+                    # Native path: compressed bytes stay on CPU through the ring.
+                    # No GPU transfer here — consumer decompresses on CPU then
+                    # pushes decompressed float32 to the destination device.
                     ring.put({
                         "layer_idx": layer_idx,
                         "k_comp": k_comp,
                         "v_comp": v_comp,
-                        "k_bytes_t": k_bytes_t,
-                        "v_bytes_t": v_bytes_t,
                         "orig_shape": orig_shape,
                         "compress_ms": t_compress.ms,
-                        "transfer_ms": t_transfer.ms,
+                        "transfer_ms": 0.0,
                         "original_bytes": original_bytes,
                         "compressed_bytes": compressed_bytes,
                         "backend": "native",
@@ -450,11 +444,8 @@ class KVBridge:
                     break
 
                 if item["backend"] == "native":
-                    import numpy as np
                     nc = self._native_compressor
                     with Timer() as t_decompress:
-                        item["k_comp"]["compressed_bytes"] = item["k_bytes_t"].numpy().astype(np.uint8)
-                        item["v_comp"]["compressed_bytes"] = item["v_bytes_t"].numpy().astype(np.uint8)
                         k_result = nc.decompress(item["k_comp"])
                         v_result = nc.decompress(item["v_comp"])
                         k_out = Tensor(k_result, device=self.dst_device).reshape(*item["orig_shape"]).realize()
