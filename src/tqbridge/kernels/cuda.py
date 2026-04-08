@@ -59,7 +59,8 @@ class CUDACompressor:
         except Exception as e:
             raise CUDAKernelError(f"Failed to compile CUDA kernels: {e}") from e
 
-        # Cache GPU-resident rotation matrices and codebooks per format
+        # Cache compiled programs and GPU-resident tables per format
+        self._programs: dict[str, object] = {}
         self._gpu_rotation: dict[int, Tensor] = {}
         self._gpu_codebook: dict[int, Tensor] = {}
         self._gpu_boundaries: dict[int, Tensor] = {}
@@ -149,28 +150,29 @@ class CUDACompressor:
     def _launch(self, kernel_name: str, grid: int, block: int, *args):
         """Launch a compiled CUDA kernel with the given arguments.
 
-        Tensor args are passed as device pointers; int args as values.
+        Tensor args are passed as device buffers; int args as kernel values.
         """
         from tinygrad import Tensor
+        from tinygrad.runtime.ops_nv import NVProgram
 
-        # Extract raw buffer pointers from tinygrad tensors
-        c_args = []
+        bufs = []
+        vals = []
         for a in args:
             if isinstance(a, Tensor):
-                # Get the underlying buffer pointer
                 a.realize()
-                buf = a.lazydata.buffer
-                buf.ensure_allocated()
-                c_args.append(buf._buf)
+                buf = a._buffer()
+                bufs.append(buf._buf)
             elif isinstance(a, int):
-                c_args.append(a)
+                vals.append(a)
             else:
                 raise TypeError(f"Unsupported kernel arg type: {type(a)}")
 
-        # Use the device's program runner
-        from tinygrad.runtime.ops_nv import NVProgram
-        prg = NVProgram(self._dev, kernel_name, self._lib)
-        prg(c_args, global_size=[grid * block, 1, 1], local_size=[block, 1, 1])
+        if kernel_name not in self._programs:
+            self._programs[kernel_name] = NVProgram(self._dev, kernel_name, self._lib)
+
+        prg = self._programs[kernel_name]
+        prg(*bufs, global_size=(grid * block, 1, 1), local_size=(block, 1, 1),
+            vals=tuple(vals))
 
     def close(self):
         """Release GPU resources."""
