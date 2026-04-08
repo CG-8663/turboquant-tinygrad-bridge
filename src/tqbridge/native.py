@@ -127,6 +127,17 @@ def _setup_prototypes(lib: ctypes.CDLL) -> None:
         ctypes.c_int,                      # seed
     ]
 
+    # tq_bridge_init_precomputed
+    lib.tq_bridge_init_precomputed.restype = ctypes.c_int
+    lib.tq_bridge_init_precomputed.argtypes = [
+        ctypes.POINTER(ctypes.c_void_p),  # tq_bridge **
+        ctypes.c_int,                      # head_dim
+        ctypes.c_int,                      # fmt
+        ctypes.POINTER(ctypes.c_float),    # rotation
+        ctypes.POINTER(ctypes.c_float),    # codebook
+        ctypes.c_int,                      # n_centroids
+    ]
+
     # tq_bridge_free
     lib.tq_bridge_free.restype = None
     lib.tq_bridge_free.argtypes = [ctypes.c_void_p]
@@ -236,14 +247,39 @@ def _check(lib: ctypes.CDLL, status: int) -> None:
 # ---------------------------------------------------------------------------
 
 class NativeBridge:
-    """Low-level wrapper around tq_bridge C context."""
+    """Low-level wrapper around tq_bridge C context.
+
+    Uses precomputed rotation matrix and codebook from the Python NumPy
+    reference implementation, ensuring bit-exact parity between C and Python
+    compression outputs for the same seed.
+    """
 
     def __init__(self, head_dim: int, fmt: Format, seed: int = 42):
         self._lib = _load_lib()
         self._ptr = ctypes.c_void_p()
-        status = self._lib.tq_bridge_init(
-            ctypes.byref(self._ptr), head_dim, _PY_TO_C_FMT[fmt], seed
-        )
+
+        bit_width = _FORMAT_BITS.get(fmt)
+        if bit_width is not None:
+            # Use precomputed rotation + codebook from the Python oracle
+            from tqbridge.compression import _get_rotation, _get_codebook
+
+            rotation = _get_rotation(head_dim, seed).astype(np.float32)
+            codebook = _get_codebook(bit_width, head_dim).astype(np.float32)
+            rotation_c = np.ascontiguousarray(rotation)
+            codebook_c = np.ascontiguousarray(codebook)
+
+            status = self._lib.tq_bridge_init_precomputed(
+                ctypes.byref(self._ptr), head_dim, _PY_TO_C_FMT[fmt],
+                rotation_c.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                codebook_c.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                len(codebook_c),
+            )
+        else:
+            # Q8_0 / FP16: no rotation needed
+            status = self._lib.tq_bridge_init(
+                ctypes.byref(self._ptr), head_dim, _PY_TO_C_FMT[fmt], seed
+            )
+
         _check(self._lib, status)
         self.head_dim = head_dim
         self.fmt = fmt
