@@ -88,6 +88,29 @@ class KVBridge:
         if self.thermal_monitor is not None:
             self.thermal_monitor.wait_if_throttled()
 
+    def warmup(self, n_heads: int = 4, seq_len: int = 8) -> float:
+        """Pre-compile all kernel shapes by running a dummy transfer cycle.
+
+        Forces tinygrad to compile and cache kernels for compress, transfer,
+        and decompress at the expected tensor shapes. Subsequent calls reuse
+        cached kernels, eliminating first-run compilation latency.
+
+        Args:
+            n_heads: number of attention heads for warmup shape
+            seq_len: sequence length for warmup shape
+
+        Returns:
+            Warmup time in milliseconds.
+        """
+        with Timer() as t:
+            shape = (n_heads, seq_len, self.head_dim)
+            k_dummy = Tensor.rand(*shape, device=self.src_device).realize()
+            v_dummy = Tensor.rand(*shape, device=self.src_device).realize()
+            k_flat = k_dummy.reshape(-1, self.head_dim)
+            v_flat = v_dummy.reshape(-1, self.head_dim)
+            self.transfer_layer(k_flat, v_flat, layer_idx=0)
+        return t.ms
+
     def transfer_layer(
         self,
         k_cache: Tensor,
@@ -316,7 +339,7 @@ class KVBridge:
         if self.show_thermal:
             print_thermal_header()
 
-        def _producer():
+        def _producer_tinygrad():
             try:
                 for layer_idx in layers:
                     self._thermal_gate()
@@ -327,13 +350,11 @@ class KVBridge:
                     k_flat = k_layer.reshape(-1, self.head_dim)
                     v_flat = v_layer.reshape(-1, self.head_dim)
 
-                    # Estimate original size without .numpy() (avoid device sync in producer)
                     n_elements = 1
                     for s in k_flat.shape:
                         n_elements *= s
-                    original_bytes = n_elements * 4 * 2  # K + V, float32
+                    original_bytes = n_elements * 4 * 2
 
-                    # Compress on source device
                     with Timer() as t_compress:
                         k_comp = self.compressor.compress(k_flat, self.fmt_k)
                         v_comp = self.compressor.compress(v_flat, self.fmt_v)
@@ -343,7 +364,6 @@ class KVBridge:
                         + self.compressor.compressed_size_bytes(v_comp)
                     )
 
-                    # Transfer to destination
                     k_xfer, k_ms = self.dma.transfer_dict(k_comp)
                     v_xfer, v_ms = self.dma.transfer_dict(v_comp)
 
@@ -356,11 +376,66 @@ class KVBridge:
                         "transfer_ms": k_ms + v_ms,
                         "original_bytes": original_bytes,
                         "compressed_bytes": compressed_bytes,
+                        "backend": "tinygrad",
                     })
             except Exception as e:
                 producer_error.append(e)
             finally:
                 ring.done()
+
+        def _producer_native():
+            import numpy as np
+            try:
+                nc = self._native_compressor
+                for layer_idx in layers:
+                    self._thermal_gate()
+
+                    k_layer = k_cache[layer_idx].realize()
+                    v_layer = v_cache[layer_idx].realize()
+                    orig_shape = k_layer.shape
+
+                    n_elements = 1
+                    for s in orig_shape:
+                        n_elements *= s
+                    original_bytes = n_elements * 4 * 2
+
+                    # Pull to CPU and compress via C
+                    with Timer() as t_compress:
+                        k_np = k_layer.reshape(-1, self.head_dim).numpy()
+                        v_np = v_layer.reshape(-1, self.head_dim).numpy()
+                        k_comp = nc.compress(k_np, self.fmt_k)
+                        v_comp = nc.compress(v_np, self.fmt_v)
+
+                    compressed_bytes = (
+                        nc.compressed_size_bytes(k_comp)
+                        + nc.compressed_size_bytes(v_comp)
+                    )
+
+                    # Transfer compressed bytes to destination
+                    with Timer() as t_transfer:
+                        k_bytes_t = Tensor(k_comp["compressed_bytes"].astype(np.uint8)).to(self.dst_device).realize()
+                        v_bytes_t = Tensor(v_comp["compressed_bytes"].astype(np.uint8)).to(self.dst_device).realize()
+                        Device[self.dst_device].synchronize()
+
+                    ring.put({
+                        "layer_idx": layer_idx,
+                        "k_comp": k_comp,
+                        "v_comp": v_comp,
+                        "k_bytes_t": k_bytes_t,
+                        "v_bytes_t": v_bytes_t,
+                        "orig_shape": orig_shape,
+                        "compress_ms": t_compress.ms,
+                        "transfer_ms": t_transfer.ms,
+                        "original_bytes": original_bytes,
+                        "compressed_bytes": compressed_bytes,
+                        "backend": "native",
+                    })
+            except Exception as e:
+                producer_error.append(e)
+            finally:
+                ring.done()
+
+        _producer = _producer_native if self.backend == "native" else _producer_tinygrad
 
         # Start producer thread
         producer = threading.Thread(target=_producer, daemon=True)
@@ -374,9 +449,20 @@ class KVBridge:
                 if RingBuffer.is_sentinel(item):
                     break
 
-                with Timer() as t_decompress:
-                    k_out = self.compressor.decompress(item["k_xfer"])
-                    v_out = self.compressor.decompress(item["v_xfer"])
+                if item["backend"] == "native":
+                    import numpy as np
+                    nc = self._native_compressor
+                    with Timer() as t_decompress:
+                        item["k_comp"]["compressed_bytes"] = item["k_bytes_t"].numpy().astype(np.uint8)
+                        item["v_comp"]["compressed_bytes"] = item["v_bytes_t"].numpy().astype(np.uint8)
+                        k_result = nc.decompress(item["k_comp"])
+                        v_result = nc.decompress(item["v_comp"])
+                        k_out = Tensor(k_result, device=self.dst_device).reshape(*item["orig_shape"]).realize()
+                        v_out = Tensor(v_result, device=self.dst_device).reshape(*item["orig_shape"]).realize()
+                else:
+                    with Timer() as t_decompress:
+                        k_out = self.compressor.decompress(item["k_xfer"])
+                        v_out = self.compressor.decompress(item["v_xfer"])
 
                 layer_idx = item["layer_idx"]
                 results[layer_idx] = (

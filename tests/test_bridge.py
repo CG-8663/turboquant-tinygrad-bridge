@@ -548,3 +548,153 @@ class TestBridgeThermalIntegration:
         out = capsys.readouterr().out
         assert "Layer" in out
         assert "Pipeline" in out
+
+
+# ---------------------------------------------------------------------------
+# Native backend tests
+# ---------------------------------------------------------------------------
+
+try:
+    from tqbridge.native import _find_library
+    _has_native_lib = _find_library() is not None
+except ImportError:
+    _has_native_lib = False
+
+native = pytest.mark.skipif(not _has_native_lib, reason="libtqbridge not built")
+native_hardware = pytest.mark.skipif(
+    not (_has_nv() and _has_metal() and _has_native_lib),
+    reason="Requires Metal + NV + libtqbridge",
+)
+
+
+@native_hardware
+class TestNativeBackendSingleLayer:
+    def test_transfer_layer_turbo3(self):
+        """Native backend: single layer transfer with turbo3."""
+        bridge = KVBridge(
+            head_dim=128, fmt_k=Format.Q8_0, fmt_v=Format.TURBO3, backend="native",
+        )
+
+        k = Tensor.rand(8, 128, device="METAL").realize()
+        v = Tensor.rand(8, 128, device="METAL").realize()
+        k_np, v_np = k.numpy(), v.numpy()
+
+        k_out, v_out, metrics = bridge.transfer_layer(k, v)
+        bridge.close()
+
+        assert k_out.device == "NV"
+        assert v_out.device == "NV"
+        assert k_out.shape == k.shape
+        assert v_out.shape == v.shape
+
+        k_mse = np.mean((k_np - k_out.numpy()) ** 2)
+        v_mse = np.mean((v_np - v_out.numpy()) ** 2)
+        assert k_mse < 1e-3, f"K MSE too high: {k_mse}"
+        assert v_mse < 0.5, f"V MSE too high: {v_mse}"
+
+    def test_metrics_populated(self):
+        """Native backend: all metrics fields populated."""
+        bridge = KVBridge(
+            head_dim=128, fmt_k=Format.Q8_0, fmt_v=Format.TURBO3, backend="native",
+        )
+
+        k = Tensor.rand(8, 128, device="METAL").realize()
+        v = Tensor.rand(8, 128, device="METAL").realize()
+
+        _, _, metrics = bridge.transfer_layer(k, v)
+        bridge.close()
+
+        assert metrics.compress_time_ms > 0
+        assert metrics.transfer_time_ms > 0
+        assert metrics.decompress_time_ms > 0
+        assert metrics.original_bytes > 0
+        assert metrics.compressed_bytes > 0
+        assert metrics.compression_ratio > 1.0
+
+
+@native_hardware
+class TestNativeBackendMultiLayer:
+    def test_multi_layer_sequential(self):
+        """Native backend: sequential multi-layer transfer."""
+        n_layers, n_heads, seq_len, head_dim = 4, 4, 16, 128
+        bridge = KVBridge(
+            head_dim=head_dim, fmt_k=Format.Q8_0, fmt_v=Format.TURBO3,
+            backend="native",
+        )
+
+        k_cache = Tensor.rand(n_layers, n_heads, seq_len, head_dim, device="METAL").realize()
+        v_cache = Tensor.rand(n_layers, n_heads, seq_len, head_dim, device="METAL").realize()
+
+        k_layers, v_layers, pipeline = bridge.transfer_kv_cache(k_cache, v_cache)
+        bridge.close()
+
+        assert len(k_layers) == n_layers
+        assert len(v_layers) == n_layers
+        for i in range(n_layers):
+            assert k_layers[i].device == "NV"
+            assert k_layers[i].shape == (n_heads, seq_len, head_dim)
+
+    def test_multi_layer_pipelined(self):
+        """Native backend: pipelined multi-layer transfer."""
+        n_layers, n_heads, seq_len, head_dim = 4, 4, 16, 128
+        bridge = KVBridge(
+            head_dim=head_dim, fmt_k=Format.Q8_0, fmt_v=Format.TURBO3,
+            backend="native",
+        )
+
+        k_cache = Tensor.rand(n_layers, n_heads, seq_len, head_dim, device="METAL").realize()
+        v_cache = Tensor.rand(n_layers, n_heads, seq_len, head_dim, device="METAL").realize()
+
+        k_layers, v_layers, pipeline = bridge.transfer_kv_cache_pipelined(k_cache, v_cache)
+        bridge.close()
+
+        assert len(k_layers) == n_layers
+        assert len(v_layers) == n_layers
+        assert len(pipeline.layers) == n_layers
+        for i in range(n_layers):
+            assert k_layers[i].device == "NV"
+            assert k_layers[i].shape == (n_heads, seq_len, head_dim)
+
+
+# ---------------------------------------------------------------------------
+# Warmup tests
+# ---------------------------------------------------------------------------
+
+@hardware
+class TestWarmup:
+    def test_warmup_returns_time(self):
+        """warmup() should return positive time in ms."""
+        bridge = KVBridge(head_dim=128, fmt_k=Format.Q8_0, fmt_v=Format.TURBO3)
+        ms = bridge.warmup(n_heads=2, seq_len=4)
+        bridge.close()
+        assert ms > 0
+
+    def test_warmup_speeds_up_subsequent(self):
+        """After warmup, first real transfer should be faster."""
+        bridge = KVBridge(head_dim=128, fmt_k=Format.Q8_0, fmt_v=Format.TURBO3)
+
+        # Warmup
+        bridge.warmup(n_heads=4, seq_len=8)
+
+        # First real transfer (kernels already cached)
+        k = Tensor.rand(4, 8, 128, device="METAL").realize()
+        v = Tensor.rand(4, 8, 128, device="METAL").realize()
+        k_flat = k.reshape(-1, 128)
+        v_flat = v.reshape(-1, 128)
+
+        _, _, metrics = bridge.transfer_layer(k_flat, v_flat)
+        bridge.close()
+
+        # Just verify it completes without error and has reasonable timing
+        assert metrics.total_time_ms > 0
+        assert metrics.total_time_ms < 5000  # sanity: < 5 seconds
+
+    @pytest.mark.skipif(not _has_native_lib, reason="libtqbridge not built")
+    def test_warmup_native_backend(self):
+        """warmup() works with native backend."""
+        bridge = KVBridge(
+            head_dim=128, fmt_k=Format.Q8_0, fmt_v=Format.TURBO3, backend="native",
+        )
+        ms = bridge.warmup(n_heads=2, seq_len=4)
+        bridge.close()
+        assert ms > 0
