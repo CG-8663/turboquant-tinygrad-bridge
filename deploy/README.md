@@ -2,7 +2,7 @@
 
 # TQBridge — Decode Node Server
 
-Compressed KV cache bridge for distributed LLM inference across heterogeneous GPUs.
+Compressed KV cache bridge for distributed LLM inference across heterogeneous GPUs. Originally built to solve the eGPU serving problem — getting maximum throughput from external GPUs (Thunderbolt 5, USB4) where per-transfer latency is high and every byte over the bus matters.
 
 ## Quick Start
 
@@ -53,90 +53,173 @@ tinygrad is an excellent GPU runtime — it compiles and dispatches tensor opera
 
 **TQBridge doesn't replace tinygrad** — it uses tinygrad for GPU kernel compilation on the orchestration node, and adds the transport, compression, and deployment layers that tinygrad wasn't designed to provide.
 
+## Why eGPU? The Origin Story
+
+TQBridge was built to solve a specific problem: **getting usable throughput from an RTX PRO 6000 Blackwell connected to a Mac via Thunderbolt 5.**
+
+The TB5 eGPU link has ~1.5ms latency per round-trip — regardless of payload size. Sending uncompressed KV cache (256KB per token) wastes this expensive link. By compressing to 26KB with TurboQuant, we send 10x less data per round-trip. Combined with custom Metal/CUDA kernels that eliminate tinygrad's per-dispatch overhead, we went from **12 tok/s to 531 tok/s** on the same hardware.
+
+The same architecture works for any high-latency link: cloud GPUs, remote servers, or multi-node clusters over Ethernet.
+
+## Kernel & Backend Support
+
+TQBridge includes custom GPU kernels that bypass tinygrad's tensor dispatch overhead. Here's what's supported:
+
+| Backend | Compress | Decompress | Kernel type | Speed |
+|---------|----------|------------|-------------|-------|
+| **CUDA** (NVIDIA) | ✅ 0.12ms | ✅ 0.12ms | Custom `.cu` kernels | 4,117 tok/s |
+| **Metal** (Apple Silicon) | ✅ 0.15ms | ✅ 0.15ms | Custom `.metal` shaders | 3,384 tok/s |
+| **Native C** (any CPU) | ✅ 1.7ms | ✅ 2.7ms | Pure C, zero deps | 295 tok/s |
+| **tinygrad** (fallback) | ✅ 5.0ms | ✅ 5.0ms | tinygrad tensor ops | 75 tok/s |
+
+The Docker decode node uses the **Native C** path — fast enough for network-connected nodes where the bottleneck is transfer, not compute. The CUDA/Metal kernels are used on the orchestration node where sub-millisecond compress matters.
+
+**tinygrad limitations the kernels solve:**
+- tinygrad's SQLite disk cache is not thread-safe — custom kernels don't use it
+- tinygrad's `ALLOW_DEVICE_USAGE` blocks GPU access from non-main threads — C kernels have no such restriction
+- tinygrad dispatches each tensor op as a separate kernel launch (~1ms each over eGPU) — custom kernels fuse the entire compress/decompress into a single launch
+- tinygrad's `Device.synchronize()` round-trips over USB4 — pre-allocated buffers avoid redundant syncs
+
 ## Use Case Scenarios
 
 ### Scenario 1: "My model doesn't fit on one machine"
 
 **Problem:** You have a 27B model (27GB Q8_0) but only 16GB machines.
 
-**Solution:** Run the model on a machine with enough RAM for the weights, use TQBridge to distribute the KV cache to decode nodes. Each decode node handles a subset of layers.
+**Step-by-step setup:**
 
-```
-Machine A (32GB, runs the model):
-  → Prefill with llama.cpp + TurboQuant
-  → Compresses KV cache 4.6x (27GB model, KV goes from 256KB to 56KB per token)
+```bash
+# Step 1: On the prefill machine (32GB+), install llama.cpp with TurboQuant
+git clone https://github.com/TheTom/llama-cpp-turboquant
+cd llama-cpp-turboquant
+git checkout feature/turboquant-kv-cache
+cmake -B build -DGGML_METAL=ON -DCMAKE_BUILD_TYPE=Release  # or -DGGML_CUDA=ON
+cmake --build build -j
 
-Machine B (16GB, Docker decode node):
-  docker run -p 9473:9473 chronaragroup/chronara-bridge
-  → Receives layers 0-15, decompresses, ready for decode
+# Step 2: On decode machine B (16GB), start the bridge
+docker run -d -p 9473:9473 --name tqbridge --restart unless-stopped chronaragroup/chronara-bridge
 
-Machine C (16GB, Docker decode node):
-  docker run -p 9473:9473 chronaragroup/chronara-bridge
-  → Receives layers 16-31, decompresses, ready for decode
+# Step 3: On decode machine C (16GB), start the bridge
+docker run -d -p 9473:9473 --name tqbridge --restart unless-stopped chronaragroup/chronara-bridge
+
+# Step 4: Run inference on the prefill machine with TurboQuant KV
+./build/bin/llama-server -m Qwen3.5-27B-Q8_0.gguf \
+    -ctk q8_0 -ctv turbo3 -ngl 99 -c 8192
+
+# The bridge distributes compressed KV to machines B and C
+# Each handles a subset of layers for decode
 ```
 
 ### Scenario 2: "Long context is too slow"
 
-**Problem:** At 32K context, your decode speed drops from 67 tok/s to 17 tok/s because the KV cache doesn't fit in fast memory.
+**Problem:** At 32K context, decode drops from 67 tok/s to 17 tok/s.
 
-**Solution:** Use asymmetric TurboQuant (q8_0 K + turbo4 V). The compressed KV cache stays in fast memory.
+**Step-by-step setup:**
 
 ```bash
-# On llama.cpp:
-./llama-server -m model.gguf -ctk q8_0 -ctv turbo4 -c 32768 -ngl 99
+# Step 1: Install llama.cpp TurboQuant fork (one time)
+git clone https://github.com/TheTom/llama-cpp-turboquant
+cd llama-cpp-turboquant && git checkout feature/turboquant-kv-cache
+cmake -B build -DGGML_METAL=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+
+# Step 2: Run with asymmetric TurboQuant
+./build/bin/llama-server -m model.gguf -ctk q8_0 -ctv turbo4 -c 32768 -ngl 99
 
 # Result: 29.2 tok/s at 32K (vs 17.1 with f16 = 71% faster)
+# No Docker needed — this is purely a llama.cpp config change
 ```
 
-No Docker needed for this scenario — it's purely a llama.cpp config change.
+### Scenario 3: "Mac + cloud GPU together"
 
-### Scenario 3: "I want to use my Mac and a cloud GPU together"
+**Problem:** M3 Mac (128GB) + cloud A100. You want them to split the work.
 
-**Problem:** You have an M3 Mac (128GB unified memory) and a cloud instance with an A100. You want them to split the work.
-
-**Solution:** Mac runs prefill + some layers. Cloud instance runs a TQBridge decode node for the rest.
-
-```
-Mac M3 Ultra (local):
-  → Runs model, prefills, handles 16 layers
-  → Compresses remaining 16 layers via TQBridge
-
-Cloud A100 (remote):
-  docker run -p 9473:9473 chronaragroup/chronara-bridge
-  → Receives 16 layers over internet, decompresses
-  → At 4.6x compression: 56KB per token over the wire
-```
-
-### Scenario 4: "I have multiple GPUs across different machines"
-
-**Problem:** You have 2 NVIDIA boxes, a Mac, and an old workstation. Different architectures, different drivers.
-
-**Solution:** Docker normalises everything. Each machine runs the same image.
+**Step-by-step setup:**
 
 ```bash
-# On every decode node (Linux x86, Linux arm64, or Mac Docker):
+# Step 1: On the cloud A100, start decode node
 docker run -d -p 9473:9473 --restart unless-stopped chronaragroup/chronara-bridge
 
-# The bridge doesn't care about GPU type — it decompresses on CPU
-# GPU acceleration is optional and automatic when available
+# Step 2: On your Mac, install TQBridge Python library
+cd turboquant-tinygrad-bridge
+pip install -e .
+
+# Step 3: Configure the bridge to route layers
+python -c "
+from tqbridge.router import KVRouter
+from tqbridge.wire import Format
+
+router = KVRouter(head_dim=128, n_kv_heads=8, src_device='METAL')
+router.add_node('local', layers=range(0, 16), transport='local', device='METAL')
+router.add_node('cloud', layers=range(16, 32), transport='tcp', host='<cloud-ip>')
+router.warmup()
+
+# Now distribute KV during inference
+# Mac handles layers 0-15 locally, cloud handles 16-31
+# At 4.6x compression: 56KB per token over the wire
+"
 ```
 
-### Scenario 5: "I want to serve multiple users from one model"
+### Scenario 4: "Multiple GPUs, different machines"
 
-**Problem:** You have one powerful machine running a model, but multiple users need inference.
+**Problem:** 2 NVIDIA boxes, a Mac, and an old workstation. Different architectures.
 
-**Solution:** Prefill once, distribute KV cache to per-user decode nodes. Each user gets their own context without re-prefilling.
+**Step-by-step setup:**
 
+```bash
+# Step 1: On EVERY decode machine (any arch), one command:
+docker run -d -p 9473:9473 --name tqbridge --restart unless-stopped chronaragroup/chronara-bridge
+
+# Step 2: Verify they're all running
+for host in 192.168.1.10 192.168.1.11 192.168.1.12; do
+    curl -s --connect-timeout 2 $host:9473 && echo "$host: OK" || echo "$host: not ready"
+done
+
+# Step 3: Configure the router on your prefill machine
+python -c "
+from tqbridge.router import KVRouter
+router = KVRouter(head_dim=128, n_kv_heads=8)
+router.add_node('nvidia1', layers=range(0, 8), transport='tcp', host='192.168.1.10')
+router.add_node('nvidia2', layers=range(8, 16), transport='tcp', host='192.168.1.11')
+router.add_node('workstation', layers=range(16, 24), transport='tcp', host='192.168.1.12')
+router.add_node('local', layers=range(24, 32), transport='local', device='METAL')
+router.warmup()
+"
+
+# Docker normalises everything — same 1MB image on x86, arm64, Mac
 ```
-Prefill Server (RTX 6000, 96GB):
-  → Loads model once
-  → Prefills for each user request
-  → Distributes compressed KV to user's decode node
 
-User A decode node: docker run -p 9473:9473 chronaragroup/chronara-bridge
-User B decode node: docker run -p 9474:9473 chronaragroup/chronara-bridge
-User C decode node: docker run -p 9475:9473 chronaragroup/chronara-bridge
+### Scenario 5: "eGPU serving (Thunderbolt / USB4)"
+
+**Problem:** RTX GPU in an eGPU enclosure connected via Thunderbolt 5. Raw transfers are slow (1.5ms latency per round-trip).
+
+**Step-by-step setup:**
+
+```bash
+# Step 1: Install TQBridge with tinygrad (for Metal/CUDA kernels)
+cd turboquant-tinygrad-bridge
+pip install -e .
+
+# Step 2: Use the CUDA backend with pre-allocated buffers
+python -c "
+from tqbridge.bridge import KVBridge
+from tqbridge.wire import Format
+
+bridge = KVBridge(
+    head_dim=128,
+    fmt_k=Format.TURBO3, fmt_v=Format.TURBO3,
+    backend='cuda',              # Custom GPU kernels on both ends
+    src_device='METAL',          # Mac compresses via Metal shader
+    dst_device='NV',             # RTX decompresses via CUDA kernel
+)
+bridge.warmup(n_heads=8, seq_len=1, n_layers=32)
+
+# Result: 531 tok/s (vs 12 tok/s without TQBridge)
+# Compress: 0.2ms (Metal) → Transfer: 1.5ms (TB5) → Decompress: 0.3ms (CUDA)
+"
 ```
+
+This is the scenario TQBridge was built for. The 1.5ms TB5 latency is physics — TQBridge minimises everything else to make that latency the only cost.
 
 ## Usage
 
