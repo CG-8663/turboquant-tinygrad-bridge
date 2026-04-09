@@ -504,26 +504,40 @@ class KVBridge:
             + self.compressor.compressed_size_bytes(v_comp)
         )
 
-        # Transfer compressed components
-        k_xfer, k_ms = self.dma.transfer_dict(k_comp)
-        v_xfer, v_ms = self.dma.transfer_dict(v_comp)
-        transfer_ms = k_ms + v_ms
-
         # Pick the best destination decompressor: CUDA > Metal > tinygrad
         dst_gpu = (getattr(self, '_cuda_compressor', None) if self.dst_device.startswith("NV")
                    else getattr(self, '_metal_compressor', None) if self.dst_device.startswith("METAL")
                    else None)
 
-        with Timer() as t_decompress:
-            def _gpu_decompress(xfer, fmt):
-                if fmt in _FMT_BITS and dst_gpu is not None:
-                    return dst_gpu.decompress(
-                        xfer["norms"], xfer["indices"], fmt
-                    ).reshape(*orig_shape)
-                return self.compressor.decompress(xfer).reshape(*orig_shape)
+        # Fast path: GPU kernels on both sides — transfer only norms+indices
+        if src_gpu is not None and dst_gpu is not None and self.fmt_k in _FMT_BITS and self.fmt_v in _FMT_BITS:
+            with Timer() as t_transfer:
+                k_norms_dst = k_comp["norms"].to(self.dst_device).realize()
+                k_idx_dst = k_comp["indices"].to(self.dst_device).realize()
+                v_norms_dst = v_comp["norms"].to(self.dst_device).realize()
+                v_idx_dst = v_comp["indices"].to(self.dst_device).realize()
+                Device[self.dst_device].synchronize()
+            transfer_ms = t_transfer.ms
 
-            k_out = _gpu_decompress(k_xfer, self.fmt_k)
-            v_out = _gpu_decompress(v_xfer, self.fmt_v)
+            with Timer() as t_decompress:
+                k_out = dst_gpu.decompress(k_norms_dst, k_idx_dst, self.fmt_k).reshape(*orig_shape)
+                v_out = dst_gpu.decompress(v_norms_dst, v_idx_dst, self.fmt_v).reshape(*orig_shape)
+        else:
+            # Fallback: dict-based transfer
+            k_xfer, k_ms = self.dma.transfer_dict(k_comp)
+            v_xfer, v_ms = self.dma.transfer_dict(v_comp)
+            transfer_ms = k_ms + v_ms
+
+            with Timer() as t_decompress:
+                def _gpu_decompress(xfer, fmt):
+                    if fmt in _FMT_BITS and dst_gpu is not None:
+                        return dst_gpu.decompress(
+                            xfer["norms"], xfer["indices"], fmt
+                        ).reshape(*orig_shape)
+                    return self.compressor.decompress(xfer).reshape(*orig_shape)
+
+                k_out = _gpu_decompress(k_xfer, self.fmt_k)
+                v_out = _gpu_decompress(v_xfer, self.fmt_v)
 
         return k_out, v_out, TransferMetrics(
             layer_idx=0, compress_time_ms=t_compress.ms,
