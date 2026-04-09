@@ -1,0 +1,22 @@
+# TQBridge Cluster — one command to start decode nodes
+#
+# Usage:
+#   docker compose -f deploy/docker-compose.yml up
+#
+# Or on individual nodes:
+#   docker compose -f deploy/docker-compose.yml up gx10-001
+
+services:
+  gx10-001:
+    image: chronara/tqbridge-server:latest
+    ports:
+      - "9473:9473"
+    command: ["--port", "9473", "--head-dim", "128"]
+    restart: unless-stopped
+
+  gx10-002:
+    image: chronara/tqbridge-server:latest
+    ports:
+      - "9474:9473"
+    command: ["--port", "9473", "--head-dim", "128"]
+    restart: unless-stopped
