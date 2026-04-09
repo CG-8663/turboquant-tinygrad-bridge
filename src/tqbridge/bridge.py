@@ -92,18 +92,57 @@ class KVBridge:
             self.thermal_monitor.start()
 
     def close(self) -> None:
-        """Stop thermal monitor and release native resources."""
-        if self.thermal_monitor is not None:
-            self.thermal_monitor.stop()
-        if self._native_compressor is not None:
-            self._native_compressor.close()
-            self._native_compressor = None
-        if self._cuda_compressor is not None:
-            self._cuda_compressor.close()
-            self._cuda_compressor = None
+        """Stop thermal monitor and release native resources.
+
+        Uses getattr() guards so __del__ is safe even if __init__ raised
+        partway through (e.g. CUDACompressor fails when no NV device exists).
+
+        Each resource is cleaned up in its own try/except so a failure in
+        one cleanup step does not leak the others. Attributes are only
+        cleared to None on successful cleanup — if a resource fails to
+        close, its reference is preserved so callers can retry or inspect.
+        """
+        errors: list[BaseException] = []
+
+        thermal = getattr(self, "thermal_monitor", None)
+        if thermal is not None:
+            try:
+                thermal.stop()
+            except BaseException as e:
+                errors.append(e)
+            else:
+                self.thermal_monitor = None
+
+        native = getattr(self, "_native_compressor", None)
+        if native is not None:
+            try:
+                native.close()
+            except BaseException as e:
+                errors.append(e)
+            else:
+                self._native_compressor = None
+
+        cuda = getattr(self, "_cuda_compressor", None)
+        if cuda is not None:
+            try:
+                cuda.close()
+            except BaseException as e:
+                errors.append(e)
+            else:
+                self._cuda_compressor = None
+
+        # Re-raise the first error so callers of close() explicitly still see
+        # failures; __del__ wraps close() in its own try/except to be GC-safe.
+        if errors:
+            raise errors[0]
 
     def __del__(self):
-        self.close()
+        # __del__ must never raise — Python's GC logs unraisable exceptions.
+        # Explicit callers of close() still see errors.
+        try:
+            self.close()
+        except BaseException:
+            pass
 
     def _thermal_gate(self) -> None:
         """Block if thermal throttle is active."""
