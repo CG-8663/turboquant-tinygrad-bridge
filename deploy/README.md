@@ -37,6 +37,22 @@ TQBridge compresses the KV cache (the model's working memory during inference) b
 - **Run longer contexts** — 131K context on 16GB machines
 - **Decode faster** — turbo4 is 71% faster than f16 at 32K context
 
+## What We Solve (Beyond tinygrad Alone)
+
+tinygrad is an excellent GPU runtime — it compiles and dispatches tensor operations across Metal, CUDA, and other backends. TQBridge solves the problems that emerge when you try to use tinygrad for **cross-device KV cache transfer** in production:
+
+| Problem | tinygrad alone | With TQBridge |
+|---------|---------------|---------------|
+| **Cross-device transfer** | `Tensor.to()` — raw uncompressed, 256KB/token | Compressed to 26KB/token (9.8x), wire protocol with CRC32 |
+| **Compression speed** | tinygrad tensor ops: 4.3ms per token | Custom Metal/CUDA kernels: 0.5ms per token (8.6x faster) |
+| **Thread safety** | SQLite disk cache + device access fail in threads | Sequential fallback for tinygrad, true threading for native C |
+| **eGPU latency** | Every `.realize()` syncs over USB4 (~1ms each) | Pre-allocated buffers, single sync point (531 tok/s vs 75) |
+| **Multi-node** | No network transport — local devices only | TCP transport with retries, timeouts, auto-reconnect |
+| **Deployment** | Python + pip + tinygrad + numpy + scipy | 1MB static C binary, zero dependencies |
+| **Kernel dispatch** | ~1ms overhead per kernel launch over eGPU | Fused compress/decompress kernels, amortized launch cost |
+
+**TQBridge doesn't replace tinygrad** — it uses tinygrad for GPU kernel compilation on the orchestration node, and adds the transport, compression, and deployment layers that tinygrad wasn't designed to provide.
+
 ## Use Case Scenarios
 
 ### Scenario 1: "My model doesn't fit on one machine"
