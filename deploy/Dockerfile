@@ -26,6 +26,11 @@ RUN cc -O2 -static -o tqbridge-server \
 # Minimal runtime — static binary on empty image (~100KB)
 FROM scratch
 COPY --from=build /build/tqbridge-server /tqbridge-server
+
+# Include CUDA kernel source for runtime compilation on any architecture
+# The decode node compiles for the detected GPU (Pascal sm_61 → Blackwell sm_120)
+COPY src/polar_quant.cu /kernels/polar_quant.cu
+
 EXPOSE 9473
 ENTRYPOINT ["/tqbridge-server"]
 CMD ["--port", "9473"]

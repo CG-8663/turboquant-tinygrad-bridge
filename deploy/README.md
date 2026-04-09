@@ -76,6 +76,18 @@ TQBridge includes custom GPU kernels that bypass tinygrad's tensor dispatch over
 | **Native C** (any CPU) | ✅ 1.7ms | ✅ 2.7ms | Pure C, zero deps | 295 tok/s |
 | **tinygrad** (fallback) | ✅ 5.0ms | ✅ 5.0ms | tinygrad tensor ops | 75 tok/s |
 
+### Supported NVIDIA Architectures
+
+| Architecture | GPUs | Status | Notes |
+|-------------|------|--------|-------|
+| **Pascal** (sm_61) | GTX 1060, 1070, 1080 | ✅ | Via [pascal-egpu](https://github.com/TheTom/pascal-egpu) on macOS eGPU |
+| **Turing** (sm_75) | RTX 2060-2080 | ✅ | Standard CUDA |
+| **Ampere** (sm_86) | RTX 3060-3090, A100 | ✅ | Standard CUDA |
+| **Ada Lovelace** (sm_89) | RTX 4060-4090 | ✅ | Standard CUDA |
+| **Blackwell** (sm_120) | RTX 5090, PRO 6000 | ✅ Tested | Primary development hardware |
+
+Kernels use only basic CUDA features (`__shared__`, `__syncthreads__`, `sqrtf`) — no warp shuffles, no tensor cores. Compiles cleanly from sm_61 through sm_120.
+
 The Docker decode node uses the **Native C** path — fast enough for network-connected nodes where the bottleneck is transfer, not compute. The CUDA/Metal kernels are used on the orchestration node where sub-millisecond compress matters.
 
 **tinygrad limitations the kernels solve:**

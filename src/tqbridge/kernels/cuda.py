@@ -30,16 +30,26 @@ class CUDAKernelError(RuntimeError):
     pass
 
 
+# GPU architecture families
+_ARCH_NAMES = {
+    "sm_61": "Pascal (GTX 10xx)",
+    "sm_75": "Turing (RTX 20xx)",
+    "sm_86": "Ampere (RTX 30xx)",
+    "sm_89": "Ada Lovelace (RTX 40xx)",
+    "sm_120": "Blackwell (RTX 50xx / PRO 6000)",
+    "sm_121": "Blackwell (GB10)",
+}
+
+
 class CUDACompressor:
     """GPU-native PolarQuant compression via custom CUDA kernels.
 
     Keeps rotation matrices and codebooks in GPU VRAM. Compress and decompress
     operate entirely on-device with no CPU round-trip.
 
-    Kernels are compiled per (head_dim, bit_width) pair with HEAD_DIM and
-    N_BOUNDARIES baked in as #defines. Scalar parameters (n_vectors) are
-    passed via a GPU buffer since tinygrad's HCQ doesn't support raw CUDA
-    scalar kernel arguments.
+    Supports all NVIDIA architectures from Pascal (sm_61, GTX 1060) through
+    Blackwell (sm_120, RTX PRO 6000). Kernels use only basic CUDA features
+    (__shared__, __syncthreads__, sqrtf) — no warp shuffles or tensor cores.
 
     Usage:
         compressor = CUDACompressor(head_dim=128, seed=42)
@@ -47,6 +57,9 @@ class CUDACompressor:
         result = compressor.decompress(norms, indices, Format.TURBO3)
         compressor.close()
     """
+
+    # Minimum supported architecture
+    MIN_SM = 61  # Pascal
 
     def __init__(self, head_dim: int = 128, seed: int = 42, device: str = "NV"):
         from tinygrad import Tensor, Device
@@ -59,6 +72,16 @@ class CUDACompressor:
             self._dev = Device[device]
         except Exception as e:
             raise CUDAKernelError(f"Failed to access device {device}: {e}") from e
+
+        # Detect and report GPU architecture
+        self.arch = self._dev.compiler.arch
+        arch_name = _ARCH_NAMES.get(self.arch, "Unknown")
+        sm_num = int(self.arch.replace("sm_", "")) if self.arch.startswith("sm_") else 0
+        if sm_num < self.MIN_SM:
+            raise CUDAKernelError(
+                f"GPU architecture {self.arch} ({arch_name}) is below minimum "
+                f"sm_{self.MIN_SM}. TQBridge kernels require Pascal (GTX 10xx) or newer."
+            )
 
         # Cache compiled libs, programs, GPU-resident tables, and pre-allocated buffers
         self._libs: dict[int, bytes] = {}
