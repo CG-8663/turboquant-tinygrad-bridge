@@ -120,6 +120,67 @@ Cluster aggregate: 10,000+ tok/s theoretical
 **Asymmetric K/V is critical**: Q8₀ K + turbo V passes needle-in-haystack 100%.
 Symmetric turbo K+V fails at 8K+ context (validated by Alex Ziskind).
 
+## Bottleneck Analysis — TB5 eGPU vs Native PCIe
+
+### Current: Mac → RTX eGPU (Thunderbolt 5)
+
+| Component | Time | % of total |
+|-----------|------|-----------|
+| Metal compress | 0.21ms | 9% |
+| **TB5 transfer** | **1.51ms** | **66%** |
+| CUDA decompress | 0.29ms | 13% |
+| Overhead | 0.29ms | 12% |
+| **Total** | **2.30ms = 434 tok/s** | |
+
+TB5 latency is 1.5ms per round-trip regardless of payload size — this is USB4/Thunderbolt protocol overhead, not bandwidth. **This is as good as Mac→eGPU gets.**
+
+### Target: RTX on GX10 (Native PCIe)
+
+| Component | Time | vs TB5 |
+|-----------|------|--------|
+| CUDA compress | 0.12ms | — |
+| PCIe transfer | 0.005ms | **300x faster** |
+| CUDA decompress | 0.12ms | — |
+| **Total** | **~0.25ms = 4,000 tok/s** | **9x faster** |
+
+Moving the RTX PRO 6000 into GX10-001 via native PCIe eliminates the TB5 latency entirely. The same CUDA kernels run at the same speed — without the 1.5ms USB4 wrapper.
+
+### Production Cluster Architecture
+
+```
+GX10-001 + RTX PRO 6000 (prefill + decode, native PCIe)
+  ├── CUDA compress: 0.12ms
+  ├── 200GbE → GX10-002: 0.05ms (compressed KV)
+  └── 200GbE → M3 Ultra: 0.05ms (compressed KV)
+
+GX10-002 / GB10 (decode)
+  └── Native C decompress: 3,400 tok/s capacity
+
+M3 Ultra (orchestrator + decode)
+  └── Metal shader decompress: 3,384 tok/s capacity
+```
+
+| Node | Role | Link | Capacity |
+|------|------|------|----------|
+| GX10-001 + RTX 6000 | Prefill + decode | Local PCIe | ~4,000 tok/s |
+| GX10-002 (GB10) | Decode | 200GbE | ~3,400 tok/s |
+| M3 Ultra | Orchestrator + decode | 200GbE | ~3,384 tok/s |
+| **Cluster aggregate** | | | **~10,000+ tok/s** |
+
+The Mac's role shifts from eGPU host to orchestrator + Metal decode node. The RTX PRO 6000 belongs on native PCIe for production throughput.
+
+## TriAttention + TurboQuant Stacking
+
+TriAttention (MIT/NVIDIA, April 2026) and TurboQuant are **complementary**:
+
+| Layer | Mechanism | Reduction | Combined |
+|-------|-----------|-----------|----------|
+| TriAttention | Token eviction (lossless) | 10.7x | |
+| TurboQuant | Value quantization (lossy) | 4.6x | |
+| **Stacked** | **Evict then compress** | | **~50x** |
+
+With 50x KV compression, a 27B model at 131K context fits comfortably on 16GB nodes. This is the path to running long-context reasoning models across heterogeneous consumer hardware.
+
 ## Software
 
 - **tqbridge**: Standalone Python package with C driver + CUDA/Metal kernels
