@@ -75,10 +75,55 @@ class TestRouterSetup:
         router.close()
 
 
+metal_only = pytest.mark.skipif(
+    not _has_metal(),
+    reason="Requires Metal device",
+)
+
+
+@metal_only
+class TestRouterLocalMetalOnly:
+    """Router tests that work on Metal-only machines (no NV required)."""
+
+    def test_single_node_metal(self):
+        """Route all layers to Metal."""
+        router = KVRouter(head_dim=128, n_kv_heads=4, src_device="METAL")
+        router.add_node("m3", layers=range(0, 4), transport="local",
+                         device="METAL", fmt_k=Format.TURBO3, fmt_v=Format.TURBO3)
+        router.warmup()
+
+        k = Tensor.rand(4, 4, 2, 128, device="METAL").realize()
+        v = Tensor.rand(4, 4, 2, 128, device="METAL").realize()
+
+        results = router.distribute(k, v)
+        assert len(results) == 1
+        assert results[0].success
+        assert results[0].transfer_ms > 0
+        assert results[0].compressed_bytes > 0
+        router.close()
+
+    def test_two_node_metal_split(self):
+        """Split layers across two Metal 'nodes'."""
+        router = KVRouter(head_dim=128, n_kv_heads=4, src_device="METAL")
+        router.add_node("metal_a", layers=range(0, 2), transport="local",
+                         device="METAL", fmt_k=Format.TURBO3, fmt_v=Format.TURBO3)
+        router.add_node("metal_b", layers=range(2, 4), transport="local",
+                         device="METAL", fmt_k=Format.TURBO3, fmt_v=Format.TURBO3)
+        router.warmup()
+
+        k = Tensor.rand(4, 4, 1, 128, device="METAL").realize()
+        v = Tensor.rand(4, 4, 1, 128, device="METAL").realize()
+
+        results = router.distribute(k, v)
+        assert len(results) == 2
+        assert all(r.success for r in results)
+        router.close()
+
+
 @hardware
 class TestRouterLocal:
     def test_single_node_distribute(self):
-        """Route all layers to one local node."""
+        """Route all layers to one NV node (requires Metal + NV)."""
         router = KVRouter(head_dim=128, n_kv_heads=4, src_device="METAL")
         router.add_node("nv", layers=range(0, 4), transport="local",
                          device="NV", fmt_k=Format.TURBO3, fmt_v=Format.TURBO3)
@@ -95,7 +140,7 @@ class TestRouterLocal:
         router.close()
 
     def test_two_node_split(self):
-        """Split layers between Metal and NV."""
+        """Split layers between Metal and NV (requires both)."""
         router = KVRouter(head_dim=128, n_kv_heads=4, src_device="METAL")
         router.add_node("local_metal", layers=range(0, 2), transport="local",
                          device="METAL", fmt_k=Format.TURBO3, fmt_v=Format.TURBO3)
