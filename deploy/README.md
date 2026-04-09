@@ -86,7 +86,21 @@ TQBridge includes custom GPU kernels that bypass tinygrad's tensor dispatch over
 | **Ada Lovelace** (sm_89) | RTX 4060-4090 | ✅ | Standard CUDA |
 | **Blackwell** (sm_120) | RTX 5090, PRO 6000 | ✅ Tested | Primary development hardware |
 
-Kernels use only basic CUDA features (`__shared__`, `__syncthreads__`, `sqrtf`) — no warp shuffles, no tensor cores. Compiles cleanly from sm_61 through sm_120.
+Kernels use only basic features (`__shared__`, `__syncthreads__`, `sqrtf`) — no warp shuffles, no tensor cores. Compiles cleanly from sm_61 through sm_120.
+
+### AMD & Intel GPU Support
+
+| Backend | GPUs | Kernel | Status |
+|---------|------|--------|--------|
+| **HIP** | AMD RDNA/CDNA (RX 6000/7000, MI series) | `polar_quant.hip` | ✅ Ready (CUDA-compatible syntax) |
+| **OpenCL** | Intel Arc, UHD, Iris; AMD iGPU; CPU runtime | `polar_quant.cl` | ✅ Ready |
+| **vGPU** | NVIDIA GRID, AMD MxGPU, Intel GVT-g | via CUDA/HIP/OpenCL | ✅ Supported |
+
+**Integrated GPUs (iGPU)** — AMD Ryzen APUs, Intel UHD/Iris, Apple Silicon — share system memory with the CPU. Zero DMA overhead makes them ideal as TQBridge decode nodes. No data copying needed; the GPU reads directly from the decompressed buffer.
+
+**vGPU** — Virtual GPU instances (cloud, enterprise) work through their underlying backend (CUDA for NVIDIA GRID, HIP for AMD MxGPU). TQBridge auto-detects the available backend.
+
+Auto-detect your GPU: `python -m tqbridge.kernels.gpu_detect`
 
 The Docker decode node uses the **Native C** path — fast enough for network-connected nodes where the bottleneck is transfer, not compute. The CUDA/Metal kernels are used on the orchestration node where sub-millisecond compress matters.
 
