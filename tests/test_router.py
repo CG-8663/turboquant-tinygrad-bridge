@@ -158,3 +158,119 @@ class TestTCPTransport:
 
         sender.close()
         receiver.stop()
+
+
+class TestTCPErrorHandling:
+    """R2: TCP transport error handling — connection failures, timeouts, retries."""
+
+    def test_connect_refused(self):
+        """Connecting to a port with no listener raises TCPTransportError."""
+        from tqbridge.router import TCPSender, TCPTransportError
+        sender = TCPSender("127.0.0.1", 19999, timeout_s=1.0, max_retries=1)
+        with pytest.raises(TCPTransportError, match="Cannot connect"):
+            sender.connect()
+
+    def test_connect_timeout(self):
+        """Connecting to a non-routable address times out."""
+        from tqbridge.router import TCPSender, TCPTransportError
+        # 192.0.2.1 is TEST-NET, guaranteed non-routable
+        sender = TCPSender("192.0.2.1", 9473, timeout_s=1.0, max_retries=1)
+        with pytest.raises(TCPTransportError, match="Cannot connect"):
+            sender.connect()
+
+    def test_send_after_server_disconnect(self):
+        """Sending after the receiver closes triggers retry and error."""
+        from tqbridge.router import TCPSender, TCPReceiver, TCPTransportError
+        from tqbridge.wire import WireHeader
+
+        receiver = TCPReceiver(port=19475)
+        receiver.start()
+
+        sender = TCPSender("127.0.0.1", 19475, timeout_s=2.0, max_retries=2)
+        sender.connect()
+        assert sender.connected
+
+        # Kill the receiver
+        receiver.stop()
+        import time
+        time.sleep(0.3)
+
+        header = WireHeader(
+            fmt_k=Format.TURBO3, fmt_v=Format.TURBO3,
+            n_layers=1, layer_start=0, seq_len=1,
+            n_heads_k=4, n_heads_v=4, head_dim=128,
+            flags=0, payload_bytes=200,
+        )
+
+        with pytest.raises(TCPTransportError):
+            sender.send_kv(b'\x00' * 100, b'\x00' * 100, header)
+        sender.close()
+
+    def test_send_auto_reconnects(self):
+        """Sender auto-reconnects if connection was never established."""
+        from tqbridge.router import TCPSender, TCPReceiver
+
+        receiver = TCPReceiver(port=19476)
+        receiver.start()
+
+        sender = TCPSender("127.0.0.1", 19476, timeout_s=2.0)
+        assert not sender.connected
+
+        from tqbridge.wire import WireHeader
+        header = WireHeader(
+            fmt_k=Format.TURBO3, fmt_v=Format.TURBO3,
+            n_layers=1, layer_start=0, seq_len=1,
+            n_heads_k=4, n_heads_v=4, head_dim=128,
+            flags=0, payload_bytes=20,
+        )
+
+        # send_kv should auto-connect
+        ms = sender.send_kv(b'\x01' * 10, b'\x02' * 10, header)
+        assert ms > 0
+        assert sender.connected
+
+        sender.close()
+        receiver.stop()
+
+    def test_connected_property(self):
+        """connected property reflects socket state."""
+        from tqbridge.router import TCPSender
+        sender = TCPSender("127.0.0.1", 19999)
+        assert not sender.connected
+        sender.close()
+        assert not sender.connected
+
+    def test_close_idempotent(self):
+        """Closing a sender multiple times doesn't raise."""
+        from tqbridge.router import TCPSender
+        sender = TCPSender("127.0.0.1", 19999)
+        sender.close()
+        sender.close()
+        sender.close()
+
+    def test_distribute_handles_node_failure(self):
+        """Router distribute returns failure result for unreachable nodes."""
+        router = KVRouter(head_dim=128, n_kv_heads=4, src_device="METAL")
+        router.add_node("dead_node", layers=range(0, 4), transport="tcp",
+                         host="192.0.2.1", port=9999)
+
+        import numpy as np
+        from tinygrad import Tensor
+        k = Tensor.rand(4, 4, 1, 128, device="METAL").realize()
+        v = Tensor.rand(4, 4, 1, 128, device="METAL").realize()
+
+        results = router.distribute(k, v)
+        assert len(results) == 1
+        assert not results[0].success
+        assert results[0].error is not None
+        router.close()
+
+    def test_warmup_marks_unavailable_nodes(self):
+        """Warmup marks unreachable TCP nodes as unavailable without crashing."""
+        router = KVRouter(head_dim=128, n_kv_heads=4, src_device="METAL")
+        router.add_node("dead", layers=range(0, 4), transport="tcp",
+                         host="192.0.2.1", port=9999)
+
+        router.warmup()
+        assert "dead" in router._unavailable_nodes
+        router.close()

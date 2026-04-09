@@ -70,19 +70,42 @@ class DistributeResult:
 # TCP transport — lightweight async sender
 # ---------------------------------------------------------------------------
 
-class TCPSender:
-    """Send compressed KV cache over TCP with wire protocol header."""
+class TCPTransportError(Exception):
+    """Error in TCP KV transport."""
+    pass
 
-    def __init__(self, host: str, port: int):
+
+class TCPSender:
+    """Send compressed KV cache over TCP with wire protocol header.
+
+    Handles connection failures, timeouts, and automatic reconnection.
+    """
+
+    def __init__(self, host: str, port: int, timeout_s: float = 10.0, max_retries: int = 3):
         self.host = host
         self.port = port
+        self.timeout_s = timeout_s
+        self.max_retries = max_retries
         self._sock: socket.socket | None = None
 
+    @property
+    def connected(self) -> bool:
+        return self._sock is not None
+
     def connect(self) -> None:
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 20)
-        self._sock.connect((self.host, self.port))
+        """Connect to the decode node. Raises TCPTransportError on failure."""
+        self.close()
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(self.timeout_s)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 20)
+            sock.connect((self.host, self.port))
+            self._sock = sock
+        except (ConnectionRefusedError, TimeoutError, OSError) as e:
+            raise TCPTransportError(
+                f"Cannot connect to {self.host}:{self.port}: {e}"
+            ) from e
 
     def send_kv(
         self,
@@ -90,21 +113,42 @@ class TCPSender:
         v_data: bytes,
         header: WireHeader,
     ) -> float:
-        """Send K+V compressed data with wire header. Returns send time in ms."""
-        if self._sock is None:
-            self.connect()
+        """Send K+V compressed data with wire header. Returns send time in ms.
 
+        Retries on transient failures with automatic reconnection.
+        Raises TCPTransportError after max_retries exhausted.
+        """
         hdr_bytes = encode_header(header)
         payload = hdr_bytes + k_data + v_data
+        last_error = None
 
-        t0 = time.perf_counter()
-        self._sock.sendall(payload)
-        t1 = time.perf_counter()
-        return (t1 - t0) * 1000
+        for attempt in range(self.max_retries):
+            try:
+                if self._sock is None:
+                    self.connect()
+
+                t0 = time.perf_counter()
+                self._sock.sendall(payload)
+                t1 = time.perf_counter()
+                return (t1 - t0) * 1000
+
+            except (BrokenPipeError, ConnectionResetError, OSError) as e:
+                last_error = e
+                self.close()
+                if attempt < self.max_retries - 1:
+                    time.sleep(0.1 * (attempt + 1))
+
+        raise TCPTransportError(
+            f"Failed to send to {self.host}:{self.port} after {self.max_retries} "
+            f"attempts: {last_error}"
+        )
 
     def close(self) -> None:
         if self._sock is not None:
-            self._sock.close()
+            try:
+                self._sock.close()
+            except OSError:
+                pass
             self._sock = None
 
 
@@ -249,7 +293,12 @@ class KVRouter:
             self._local_bridges[name] = bridge
 
     def warmup(self) -> float:
-        """Pre-compile kernels and pre-allocate buffers for all nodes."""
+        """Pre-compile kernels and pre-allocate buffers for all nodes.
+
+        TCP nodes that fail to connect are marked as unavailable but don't
+        block warmup of other nodes.
+        """
+        self._unavailable_nodes: set[str] = set()
         with Timer() as t:
             for name, node in self.nodes.items():
                 n_layers = len(node.layers)
@@ -259,7 +308,11 @@ class KVRouter:
                         n_heads=self.n_kv_heads, seq_len=1, n_layers=n_layers,
                     )
                 elif node.transport == "tcp":
-                    self._tcp_senders[name].connect()
+                    try:
+                        self._tcp_senders[name].connect()
+                    except TCPTransportError as e:
+                        self._unavailable_nodes.add(name)
+                        print(f"  WARNING: {name} unavailable: {e}")
         return t.ms
 
     def distribute(
