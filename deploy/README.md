@@ -4,6 +4,10 @@
 
 Compressed KV cache bridge for distributed LLM inference across heterogeneous GPUs. Originally built to solve the eGPU serving problem — getting maximum throughput from external GPUs (Thunderbolt 5, USB4) where per-transfer latency is high and every byte over the bus matters.
 
+> **Work in progress.** TQBridge is under active development. The per-token bridge throughput (531 tok/s) is near the Thunderbolt 5 latency ceiling — the GPU kernels finish in 0.5ms but each USB4 round-trip costs 1.5ms. That's physics, not software.
+>
+> Where TQBridge makes the biggest impact today is **prefill distribution and hardware utilisation** — compressing the KV cache lets you spread a 27B model across machines that individually can't hold it, serve longer contexts without running out of memory, and keep every GPU in your cluster productive instead of idle. The bridge turns a collection of mismatched hardware into a single inference system.
+
 ## Quick Start
 
 ```bash
