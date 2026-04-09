@@ -8,15 +8,15 @@
 
 services:
   gx10-001:
-    image: chronara/tqbridge-server:latest
+    image: chronaragroup/chronara-bridge:latest
     ports:
       - "9473:9473"
     command: ["--port", "9473", "--head-dim", "128"]
     restart: unless-stopped
 
   gx10-002:
-    image: chronara/tqbridge-server:latest
+    image: chronaragroup/chronara-bridge:latest
     ports:
-      - "9474:9473"
+      - "9473:9473"
     command: ["--port", "9473", "--head-dim", "128"]
     restart: unless-stopped
