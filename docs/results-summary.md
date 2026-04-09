@@ -1,5 +1,21 @@
 # TQBridge — TurboQuant KV Cache Bridge Results
 
+## Bottom Line
+
+TQBridge makes large language models run faster at long conversations by compressing the memory they use to track context. The longer a conversation gets, the bigger the advantage.
+
+**What it does:** Compresses the KV cache (the model's working memory) by 4-5x using TurboQuant, then transfers it between GPUs across a network. This lets you split a model across multiple machines — a Mac, NVIDIA GPUs, and server nodes — and run them together as one system.
+
+**Key results:**
+- A 27B-parameter model runs at **near-identical speed** with 4x less memory usage (within 1.5% of uncompressed)
+- At 32K token conversations, TurboQuant is actually **71% faster** than the baseline on an 8B model — because smaller memory means faster reads
+- Our custom GPU kernels compress and decompress in **under 0.5ms** — fast enough that the bottleneck is the cable, not the computation
+- A 4-node cluster (Mac + 2 server nodes + NVIDIA GPU) runs the bridge end-to-end over 200Gbps Ethernet
+
+**What this means:** You can run larger models, with longer context, on cheaper hardware, by spreading the work across whatever GPUs you have. A 27B reasoning model at 131K context that would normally need 64GB+ of GPU memory can run comfortably across machines with 16GB each.
+
+---
+
 ## Hardware
 
 | Node | GPU | Memory | Link |
