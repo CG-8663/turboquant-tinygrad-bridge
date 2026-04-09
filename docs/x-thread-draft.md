@@ -38,7 +38,7 @@ Turbo4 beats f16 at 4K+ context.
 
 Prefill speed identical (±0.6%).
 
-Built on @no_step_on_snek's TurboQuant+ fork of llama.cpp.
+Built on @TheTom's TurboQuant+ fork of llama.cpp.
 
 ---
 
@@ -88,7 +88,7 @@ github.com/CG-8663/turboquant-tinygrad-bridge
 
 Built on the shoulders of:
 
-@no_step_on_snek — TurboQuant+ llama.cpp fork. Asymmetric K/V, sparse V dequant, Metal kernels. The compression that makes this possible.
+@TheTom — TurboQuant+ llama.cpp fork. Asymmetric K/V, sparse V dequant, Metal kernels. The compression that makes this possible.
 
 @__tinygrad__ — GPU runtime for Metal + CUDA kernel compilation.
 
@@ -96,7 +96,7 @@ Built on the shoulders of:
 
 Google Research — TurboQuant paper (ICLR 2026).
 
-@difitalix — community validation that asymmetric turbo works on real hardware.
+@AlexZiskind — community validation that asymmetric turbo works on real hardware.
 
 ---
 
@@ -119,9 +119,9 @@ What models are you running? Let us know what you see.
 ---
 
 ## Tag suggestions:
-- @no_step_on_snek (Tom Turney, TurboQuant+)
+- @TheTom (Tom Turney, TurboQuant+)
 - @__tinygrad__ (tinygrad)
-- @difitalix (Alex Ziskind, community testing)
+- @AlexZiskind (Alex Ziskind, community testing)
 - @Prince_Canuma (Prince Canuma, MLX ecosystem inspiration)
 - @chronaboratory (Chronara)
 - @exaboratory (exo, if pitching integration)
