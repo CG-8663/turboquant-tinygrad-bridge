@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/CG-8663/turboquant-tinygrad-bridge/main/docs/logo.png" alt="Chronara" width="180">
+</p>
+
 # TQBridge — Decode Node Server
 
 Compressed KV cache bridge for distributed LLM inference across heterogeneous GPUs.
