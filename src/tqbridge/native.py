@@ -449,11 +449,31 @@ class NativeCompressor:
         fmt = compressed["fmt"]
 
         if fmt in _FORMAT_BITS:
-            bridge = compressed["_bridge"]
-            comp = compressed["_c_struct"]
-            vectors = bridge.decompress(comp)
-            bridge.free_compressed(comp)
-            return vectors.reshape(compressed["orig_shape"])
+            if "_bridge" in compressed:
+                # Local path: use the C struct from compress()
+                bridge = compressed["_bridge"]
+                comp = compressed["_c_struct"]
+                vectors = bridge.decompress(comp)
+                bridge.free_compressed(comp)
+                return vectors.reshape(compressed["orig_shape"])
+            else:
+                # Remote/TCP path: decompress from raw compressed bytes
+                bridge = self._get_bridge(fmt)
+                n_vectors = compressed.get("n_vectors",
+                    compressed["n_elements"] // self.head_dim)
+                raw = np.ascontiguousarray(compressed["compressed_bytes"], dtype=np.uint8)
+
+                # Feed bytes into C bridge for decompression
+                c_comp = _TqCompressed()
+                c_buf = (ctypes.c_uint8 * len(raw)).from_buffer_copy(raw)
+                c_comp.data = ctypes.cast(c_buf, ctypes.c_void_p)
+                c_comp.size = len(raw)
+                c_comp.n_vectors = n_vectors
+                c_comp.head_dim = self.head_dim
+                c_comp.fmt = _PY_TO_C_FMT[fmt]
+
+                vectors = bridge.decompress(c_comp)
+                return vectors.reshape(compressed["orig_shape"])
 
         elif fmt == Format.Q8_0:
             lib = _load_lib()
