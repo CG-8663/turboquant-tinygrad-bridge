@@ -324,15 +324,17 @@ TQBridge builds on the work of several excellent projects:
 
 - **[TurboQuant](https://research.google/blog/turboquant-redefining-ai-efficiency-with-extreme-compression/)** (Google Research, ICLR 2026) — the KV cache compression algorithm at the heart of this bridge
 - **[TurboQuant+](https://github.com/TheTom/llama-cpp-turboquant)** by Tom Turney — the llama.cpp implementation with asymmetric K/V, sparse V dequant, and Metal kernels that made TurboQuant practical for local inference
+- **[Pascal eGPU](https://github.com/TheTom/pascal-egpu)** by Tom Turney — driverless NVIDIA Pascal (GTX 10-series) compute from macOS Apple Silicon over Thunderbolt eGPU, enabling older GPUs to participate in TQBridge clusters
 - **[tinygrad](https://github.com/tinygrad/tinygrad)** by George Hotz — the GPU runtime we use for Metal and CUDA kernel dispatch on the orchestration node
 
-We're not replacing any of these — TQBridge is the transport layer that connects them across machines. Run TurboQuant+ on your prefill node, distribute the compressed KV cache through TQBridge to your decode fleet.
+We're not replacing any of these — TQBridge is the transport layer that connects them across machines. Run TurboQuant+ on your prefill node, distribute the compressed KV cache through TQBridge to your decode fleet. Got an old GTX 1060 in a drawer? Pascal eGPU + TQBridge puts it back to work.
 
 ## Links
 
 - [Benchmark Results](https://github.com/CG-8663/turboquant-tinygrad-bridge/blob/main/docs/results-summary.md)
 - [TurboQuant Paper (ICLR 2026)](https://research.google/blog/turboquant-redefining-ai-efficiency-with-extreme-compression/)
 - [TurboQuant+ (llama.cpp fork)](https://github.com/TheTom/llama-cpp-turboquant)
+- [Pascal eGPU (GTX 10-series on macOS)](https://github.com/TheTom/pascal-egpu)
 - [tinygrad](https://github.com/tinygrad/tinygrad)
 - [Source Code](https://github.com/CG-8663/turboquant-tinygrad-bridge)
 - [Docker Hub](https://hub.docker.com/r/chronaragroup/chronara-bridge)
