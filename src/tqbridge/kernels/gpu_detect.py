@@ -18,6 +18,12 @@ from dataclasses import dataclass
 from typing import Literal
 
 
+# Memory safety: never exceed 80% of unified/shared memory.
+# Unified memory (Mac, GX10 Grace, AMD APU) is shared between GPU and CPU.
+# Using more than 80% risks OS instability, swap thrashing, or kernel OOM.
+UNIFIED_MEMORY_LIMIT = 0.80  # 80% max utilisation
+
+
 @dataclass
 class GPUInfo:
     """Detected GPU information."""
@@ -28,6 +34,13 @@ class GPUInfo:
     is_integrated: bool  # iGPU shares system memory
     is_vgpu: bool        # virtual GPU instance
     compute_capability: str  # e.g. "sm_61", "gfx1100", "gen12"
+
+    @property
+    def safe_memory_mb(self) -> int:
+        """Maximum memory to use (80% of total for unified memory systems)."""
+        if self.is_integrated:
+            return int(self.memory_mb * UNIFIED_MEMORY_LIMIT)
+        return self.memory_mb
 
 
 def detect_gpus() -> list[GPUInfo]:
@@ -151,6 +164,12 @@ def print_gpu_report():
 
     best = select_best_backend(gpus)
     print(f"\n  Selected: {best.backend} ({best.device_name})")
+
+    # Memory safety warning for unified memory systems
+    unified = [g for g in gpus if g.is_integrated and g.backend != "cpu"]
+    if unified:
+        print(f"\n  ⚠ Unified memory detected — limiting to {int(UNIFIED_MEMORY_LIMIT*100)}% "
+              f"of total RAM for OS stability")
 
 
 if __name__ == "__main__":
