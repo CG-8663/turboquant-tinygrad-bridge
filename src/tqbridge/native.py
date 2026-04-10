@@ -255,6 +255,9 @@ class NativeBridge:
     """
 
     def __init__(self, head_dim: int, fmt: Format, seed: int = 42):
+        # Initialize attributes first so __del__ is safe if construction fails partway.
+        self._lib = None
+        self._ptr = None
         self._lib = _load_lib()
         self._ptr = ctypes.c_void_p()
 
@@ -337,12 +340,21 @@ class NativeBridge:
         self._lib.tq_compressed_free(ctypes.byref(comp))
 
     def close(self) -> None:
-        if self._ptr:
-            self._lib.tq_bridge_free(self._ptr)
+        # Guard against partial construction: if __init__ raised before these
+        # attributes were assigned, __del__ will still call close() on the
+        # incomplete instance. Use getattr() to avoid AttributeError.
+        ptr = getattr(self, "_ptr", None)
+        lib = getattr(self, "_lib", None)
+        if ptr and lib is not None:
+            lib.tq_bridge_free(ptr)
             self._ptr = ctypes.c_void_p()
 
     def __del__(self):
-        self.close()
+        # __del__ must never raise into GC.
+        try:
+            self.close()
+        except BaseException:
+            pass
 
     def __enter__(self):
         return self
@@ -514,7 +526,11 @@ class NativeCompressor:
         self._bridges.clear()
 
     def __del__(self):
-        self.close()
+        # __del__ must never raise into GC.
+        try:
+            self.close()
+        except BaseException:
+            pass
 
 
 # ---------------------------------------------------------------------------
