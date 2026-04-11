@@ -331,11 +331,18 @@ class KVRouter:
         Returns:
             List of DistributeResult, one per node.
         """
-        # tinygrad is not thread-safe — only use parallel for TCP-only routes
-        has_local = any(n.transport == "local" for n in self.nodes.values())
-        if parallel and len(self.nodes) > 1 and not has_local:
+        # Split: local nodes run sequential on main thread (tinygrad not thread-safe),
+        # TCP nodes run in parallel threads. Both groups run concurrently.
+        local_nodes = [(n, cfg) for n, cfg in self.nodes.items() if cfg.transport == "local"]
+        tcp_nodes = [(n, cfg) for n, cfg in self.nodes.items() if cfg.transport == "tcp"]
+
+        if not tcp_nodes:
+            return self._distribute_sequential(k_cache, v_cache)
+        if not local_nodes:
             return self._distribute_parallel(k_cache, v_cache)
-        return self._distribute_sequential(k_cache, v_cache)
+
+        # Mixed: fire TCP in background threads, run local on main thread
+        return self._distribute_mixed(k_cache, v_cache, local_nodes, tcp_nodes)
 
     def _distribute_sequential(self, k_cache, v_cache) -> list[DistributeResult]:
         results = []
@@ -359,6 +366,32 @@ class KVRouter:
             t.join()
 
         return results
+
+    def _distribute_mixed(self, k_cache, v_cache,
+                           local_nodes, tcp_nodes) -> list[DistributeResult]:
+        """Run TCP transfers in parallel threads while local transfers run on main thread."""
+        tcp_results = [None] * len(tcp_nodes)
+        threads = []
+
+        # Fire all TCP sends in background threads first
+        for idx, (name, node) in enumerate(tcp_nodes):
+            def _send(i=idx, n=name, nd=node):
+                tcp_results[i] = self._send_to_node(n, nd, k_cache, v_cache)
+            t = threading.Thread(target=_send)
+            threads.append(t)
+            t.start()
+
+        # Run local transfers on main thread (overlaps with TCP)
+        local_results = []
+        for name, node in local_nodes:
+            r = self._send_to_node(name, node, k_cache, v_cache)
+            local_results.append(r)
+
+        # Wait for TCP threads to finish
+        for t in threads:
+            t.join()
+
+        return local_results + [r for r in tcp_results if r is not None]
 
     def _send_to_node(
         self, name: str, node: NodeConfig, k_cache, v_cache
