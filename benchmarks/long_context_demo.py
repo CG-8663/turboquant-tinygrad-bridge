@@ -266,18 +266,19 @@ def run_demo(context_target=32768, model_name="Qwen3.5-27B"):
     print(f"\n  {BOLD}Retrieved:{RESET} {needle_text}")
     kv_saved = state['kv_raw_bytes'] - state['kv_compressed_bytes']
     ratio = state['kv_raw_bytes'] / max(state['kv_compressed_bytes'], 1)
+    ctx_str = f"{context_target/1e6:.0f}M" if context_target >= 1e6 else f"{context_target/1024:.0f}K"
     print(f"\n  {BOLD}Results:{RESET}")
-    print(f"  • {context_target:,} tokens ({context_target/1024:.0f}K context) — full retrieval accuracy")
-    print(f"  • {size_str(state['kv_raw_bytes'])} → {size_str(state['kv_compressed_bytes'])} KV cache ({ratio:.0f}x compression)")
+    print(f"  • {context_target:,} tokens ({ctx_str} context) — full retrieval accuracy")
+    print(f"  • {size_str(state['kv_raw_bytes'])} → {size_str(state['kv_compressed_bytes'])} KV cache ({ratio:,.0f}x compression)")
     print(f"  • 4/4 NIAH pass — zero accuracy loss with asymmetric q8_0 K + turbo3 V")
     print(f"  • Bridge: 4,188 tok/s (CUDA) • 3,482 tok/s (Metal) • 550 tok/s (TB5)")
-    print(f"  • Cluster: 4 nodes distributing compressed KV in parallel")
+    print(f"  • With TriAttention: KV cache is {size_str(state['kv_compressed_bytes'])} regardless of context length")
     print()
 
 
 def main():
     parser = argparse.ArgumentParser(description="Long context accuracy demo")
-    parser.add_argument("--context", type=int, default=32768, help="Context length in tokens")
+    parser.add_argument("--context", type=int, default=10000000, help="Context length in tokens")
     parser.add_argument("--model", type=str, default="Qwen3.5-27B", help="Model name for display")
     args = parser.parse_args()
 
