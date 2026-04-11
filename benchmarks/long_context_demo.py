@@ -59,10 +59,12 @@ def draw_dashboard(state):
 
     # Header
     print(f"{BOLD}{CYAN}")
-    print(f"  ╔══════════════════════════════════════════════════════════════════╗")
-    print(f"  ║   TQBridge — Long Context Accuracy Demo                        ║")
-    print(f"  ║   Chronara Group • TurboQuant + TriAttention                   ║")
-    print(f"  ╚══════════════════════════════════════════════════════════════════╝{RESET}")
+    print(f"  ╔════════════════════════════════════════════════════════════════════╗")
+    print(f"  ║                                                                  ║")
+    print(f"  ║   TQBridge — Long Context Accuracy Demo                          ║")
+    print(f"  ║   Chronara Group  •  TurboQuant + TriAttention                   ║")
+    print(f"  ║                                                                  ║")
+    print(f"  ╚════════════════════════════════════════════════════════════════════╝{RESET}")
     print()
 
     # Model info
