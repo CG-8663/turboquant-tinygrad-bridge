@@ -139,8 +139,12 @@ def run_demo(context_target=32768, model_name="Qwen3.5-27B"):
     """Run the visual long-context demo."""
 
     # Model parameters
-    n_layers = 48 if "27B" in model_name else 32
-    n_kv_heads = 4 if "27B" in model_name else 8
+    if "405B" in model_name:
+        n_layers, n_kv_heads = 126, 8
+    elif "27B" in model_name:
+        n_layers, n_kv_heads = 48, 4
+    else:
+        n_layers, n_kv_heads = 32, 8
     head_dim = 128
     kv_bytes_per_token = n_layers * n_kv_heads * head_dim * 4 * 2  # K+V fp32
 
@@ -155,10 +159,10 @@ def run_demo(context_target=32768, model_name="Qwen3.5-27B"):
             {'name': 'GX10-001', 'role': 'Decode (Docker)', 'status': 'active', 'layers': 'layers 24-35'},
             {'name': 'M1 Max', 'role': 'Decode (C binary)', 'status': 'active', 'layers': 'layers 36-47'},
         ] if n_layers == 48 else [
-            {'name': 'M3 Ultra', 'role': 'Prefill + Decode', 'status': 'active', 'layers': 'layers 0-7'},
-            {'name': 'RTX PRO 6000', 'role': 'Decode (CUDA)', 'status': 'active', 'layers': 'layers 8-15'},
-            {'name': 'GX10-001', 'role': 'Decode (Docker)', 'status': 'active', 'layers': 'layers 16-23'},
-            {'name': 'M1 Max', 'role': 'Decode (C binary)', 'status': 'active', 'layers': 'layers 24-31'},
+            {'name': 'M3 Ultra', 'role': 'Prefill + Decode', 'status': 'active', 'layers': f'layers 0-{n_layers//4-1}'},
+            {'name': 'RTX PRO 6000', 'role': 'Decode (CUDA)', 'status': 'active', 'layers': f'layers {n_layers//4}-{n_layers//2-1}'},
+            {'name': 'GX10-001', 'role': 'Decode (Docker)', 'status': 'active', 'layers': f'layers {n_layers//2}-{3*n_layers//4-1}'},
+            {'name': 'M1 Max', 'role': 'Decode (C binary)', 'status': 'active', 'layers': f'layers {3*n_layers//4}-{n_layers-1}'},
         ],
         'niah_results': {},
         'kv_raw_bytes': 0,
