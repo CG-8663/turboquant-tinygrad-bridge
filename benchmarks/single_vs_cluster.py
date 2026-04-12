@@ -126,7 +126,7 @@ def run_demo():
     print()
 
     type_line(f"  TurboQuant compresses the KV cache 9.8x (Tom Turney, TurboQuant+)", 0.02)
-    type_line(f"  TriAttention evicts redundant tokens (Weian Mao et al., MIT/NVIDIA)", 0.02)
+    type_line(f"  TriAttention evicts redundant tokens (Weian Mao et al.)", 0.02)
     type_line(f"  TQBridge distributes compressed KV across any hardware", 0.02)
     print()
     pause(1)
@@ -216,7 +216,7 @@ def run_demo():
     print()
 
     print(f"  {DIM}Built with: TurboQuant (Google Research) • TurboQuant+ (Tom Turney){RESET}")
-    print(f"  {DIM}TriAttention (Weian Mao et al.) • tinygrad (George Hotz){RESET}")
+    print(f"  {DIM}TriAttention (Weian Mao et al.) • tinygrad (George Hotz) {RESET}")
     print(f"  {DIM}TQBridge transport layer • Chronara Group{RESET}")
     print()
 
