@@ -20,11 +20,11 @@ TQBridge makes large language models run faster at long conversations by compres
 
 | Node | GPU | Memory | Link |
 |------|-----|--------|------|
-| M3 Ultra (Mac Studio) | Apple M3 Ultra | 128 GB unified | Local / TB5 |
+| M3 Ultra (Mac Studio) | Apple M3 Ultra | 96 GB unified | Local / TB5 |
 | RTX PRO 6000 | Blackwell (eGPU) | 96 GB GDDR7 | Thunderbolt 5 |
 | GX10-001 (Chronara) | NVIDIA GB10 | — | 200GbE bonded |
 | GX10-002 (Chronara) | NVIDIA GB10 | — | 200GbE bonded |
-| M1 Ultra (Mac Studio) | Apple M1 Ultra | 64 GB unified | Local / Ethernet |
+| M1 Max (Mac Studio) | Apple M1 Max | 32 GB unified | Local / Ethernet |
 
 ## Qwen3-8B Q8_0 — Decode tok/s vs Context Depth (M3 Ultra)
 
@@ -185,7 +185,7 @@ M1 Ultra (decode)
 | GX10-001 + RTX 6000 | Prefill + decode | Local PCIe | ~4,000 tok/s |
 | GX10-002 (GB10) | Decode | 200GbE | ~3,400 tok/s |
 | M3 Ultra | Orchestrator + decode | 200GbE/local | ~3,384 tok/s |
-| M1 Ultra | Decode | 200GbE/local | ~1,500 tok/s |
+| M1 Max (32GB) | Decode | 200GbE/local | ~1,500 tok/s |
 | **Cluster aggregate** | | | **~12,000+ tok/s** |
 
 The Macs shift from eGPU hosts to orchestrators + Metal decode nodes. The RTX PRO 6000 belongs on native PCIe for production throughput.
