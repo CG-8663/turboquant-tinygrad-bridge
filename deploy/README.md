@@ -11,10 +11,57 @@ Compressed KV cache bridge for distributed LLM inference across heterogeneous GP
 ## Quick Start
 
 ```bash
+# Verify it works on your machine
+docker run --rm chronaragroup/chronara-bridge --self-test
+
+# Benchmark your hardware
+docker run --rm chronaragroup/chronara-bridge --benchmark
+
+# Start the decode server
 docker run -p 9473:9473 chronaragroup/chronara-bridge
 ```
 
-That's it. The server listens for compressed KV cache transfers on port 9473, decompresses them, and is ready for decode inference.
+## How It Grows With You
+
+TQBridge is modular. Start with what you have, add hardware when you're ready. If no eGPU is present, TurboQuant KV compression and TriAttention token eviction activate automatically to help you get more from your existing hardware.
+
+**Level 1: Single Mac (no eGPU)**
+```
+You have: Mac with Apple Silicon
+What activates: TurboQuant KV compression + TriAttention token eviction
+What you get: longer context, lower memory usage, same quality
+Install: pip install tqbridge
+```
+No eGPU needed. TurboQuant compresses your KV cache in-place (9.8x savings). TriAttention evicts redundant tokens. A 27B model at 128K context that would crash now fits comfortably. One click install.
+
+**Level 2: Mac + eGPU**
+```
+You have: Mac + NVIDIA eGPU (Thunderbolt 3/4/5)
+What activates: TQBridge compression bridge (Metal ↔ CUDA)
+What you get: split inference across two GPUs
+Install: pip install tqbridge (auto-detects eGPU)
+```
+The bridge compresses KV on Metal, transfers over Thunderbolt, decompresses on CUDA. Your Mac handles some layers, the eGPU handles the rest. 531 tok/s bridge throughput.
+
+**Level 3: Mac + eGPU + network nodes**
+```
+You have: Mac + eGPU + other machines on your network
+What activates: TCP transport to Docker decode nodes
+What you get: distribute inference across everything you own
+Install: docker run chronaragroup/chronara-bridge on each node
+```
+Every machine with Docker becomes a decode node. Old laptops, spare desktops, cloud instances — they all contribute. The bridge handles compression and routing automatically.
+
+**Level 4: Chronara Mesh (supernode)**
+```
+You have: ShadowMesh supernode access (FNT holders)
+What activates: ExaFLOP pool — contribute compute, access the cluster
+What you get: 405B models, unlimited context, global inference mesh
+Install: supernode --enable-ai-compute
+```
+Your hardware joins the Chronara ExaFLOP pool. You contribute decode capacity, you get access to models and context lengths that no single machine can run.
+
+**Each level is additive.** Level 1 features don't disappear when you add an eGPU. Level 2 features don't disappear when you add network nodes. The system grows with your hardware.
 
 ## Dependencies
 
