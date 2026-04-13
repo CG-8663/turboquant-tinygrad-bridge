@@ -1,6 +1,10 @@
 #!/bin/bash
-# Hyvia Interactive Demo — Streaming with conversation history
+# Hyvia Interactive Demo — wrapper for Python version
 # Runs on GX10-001 GB10 CUDA via llama.cpp
+exec /opt/homebrew/bin/python3.12 "$(dirname "$0")/hyvia-demo.py" "$@"
+
+# Legacy bash version below (kept for reference, not executed)
+exit 0
 
 HOST="192.168.68.61"
 PORT="8080"
