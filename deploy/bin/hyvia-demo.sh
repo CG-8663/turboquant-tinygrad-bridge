@@ -25,21 +25,19 @@ while true; do
     read -r PROMPT
     [ -z "$PROMPT" ] && continue
 
-    echo -e "\n${DIM}  Generating on GX10-001 GB10 CUDA...${RESET}"
+    echo -e "\n${CYAN}  Hyvia:${RESET}\n"
 
-    # Non-streaming request — simpler, gets timing from server
-    RESPONSE=$(curl -s "http://${HOST}:${PORT}/completion" \
+    # Stream + render: collect tokens, render markdown progressively
+    curl -sN "http://${HOST}:${PORT}/completion" \
         -H "Content-Type: application/json" \
         -d "{
             \"prompt\": \"<|im_start|>system\n${SYSTEM}<|im_end|>\n<|im_start|>user\n/no_think ${PROMPT}<|im_end|>\n<|im_start|>assistant\n\",
             \"max_tokens\": 500,
             \"temperature\": 0.7,
+            \"stream\": true,
             \"stop\": [\"<|im_end|>\", \"<|im_start|>\"]
-        }" 2>/dev/null)
-
-    # Render with markdown formatting
-    echo "$RESPONSE" | python3 -c "
-import json, re, sys, textwrap
+        }" 2>/dev/null | python3 -c "
+import json, re, sys, time, textwrap
 
 BOLD = '\033[1m'
 DIM = '\033[2m'
@@ -49,62 +47,88 @@ YELLOW = '\033[93m'
 WHITE = '\033[97m'
 R = '\033[0m'
 
-try:
-    d = json.load(sys.stdin)
-    text = d.get('content', '')
-    tps = d.get('timings', {}).get('predicted_per_second', 0)
-    tokens = d.get('tokens_predicted', 0)
-    prompt_tps = d.get('timings', {}).get('prompt_per_second', 0)
+def render_line(line):
+    if not line.rstrip():
+        print()
+        return
+    line = re.sub(r'\*\*(.+?)\*\*', f'{BOLD}{WHITE}\\1{R}', line.rstrip())
+    if line.lstrip().startswith('### '):
+        print(f'  {BOLD}{CYAN}{line.lstrip()[4:]}{R}')
+    elif line.lstrip().startswith('## '):
+        print(f'  {BOLD}{CYAN}{line.lstrip()[3:]}{R}')
+    elif line.lstrip().startswith('# '):
+        print(f'  {BOLD}{CYAN}{line.lstrip()[2:]}{R}')
+    elif line.lstrip().startswith('- ') or line.lstrip().startswith('* '):
+        indent = '  ' + ' ' * ((len(line) - len(line.lstrip())) // 2)
+        content = line.lstrip()[2:]
+        wrapped = textwrap.fill(content, width=72, subsequent_indent=indent + '  ')
+        print(f'{indent}{GREEN}●{R} {wrapped}')
+    elif re.match(r'\s*\d+[\.\)]\s', line):
+        m = re.match(r'(\s*)(\d+[\.\)])\s*(.*)', line)
+        if m:
+            pad = '  ' + ' ' * (len(m.group(1)) // 2)
+            wrapped = textwrap.fill(m.group(3), width=72, subsequent_indent=pad + '   ')
+            print(f'{pad}{YELLOW}{m.group(2)}{R} {wrapped}')
+    else:
+        wrapped = textwrap.fill(line, width=76, initial_indent='  ', subsequent_indent='  ')
+        print(wrapped)
 
-    # Strip think blocks
-    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-    text = re.sub(r'<think>.*', '', text, flags=re.DOTALL)
-    text = text.strip()
+t0 = time.time()
+n_tokens = 0
+in_think = False
+line_buf = ''
 
-    print(f'\n{CYAN}  Hyvia:{R}')
-    print()
+for raw in sys.stdin:
+    raw = raw.strip()
+    if raw.startswith('data: '): raw = raw[6:]
+    if not raw or raw == '[DONE]': continue
 
-    for line in text.split('\n'):
-        line = line.rstrip()
-        if not line:
-            print()
-            continue
+    try:
+        d = json.loads(raw)
+        tok = d.get('content', '')
+        stop = d.get('stop', False)
+    except:
+        continue
 
-        # Bold markers **text**
-        line = re.sub(r'\*\*(.+?)\*\*', f'{BOLD}{WHITE}\\1{R}', line)
+    if stop:
+        # Final token — render remaining buffer
+        if line_buf.strip():
+            render_line(line_buf)
+        # Get timing from the stop message
+        tps = d.get('timings', {}).get('predicted_per_second', 0)
+        pp = d.get('timings', {}).get('prompt_per_second', 0)
+        n_tok = d.get('tokens_predicted', n_tokens)
+        print(f'\n  {DIM}[{n_tok} tokens | prefill {pp:.0f} tok/s | decode {tps:.1f} tok/s | GB10 CUDA]{R}')
+        break
 
-        # Headers
-        if line.lstrip().startswith('### '):
-            print(f'  {BOLD}{CYAN}{line.lstrip()[4:]}{R}')
-        elif line.lstrip().startswith('## '):
-            print(f'  {BOLD}{CYAN}{line.lstrip()[3:]}{R}')
-        elif line.lstrip().startswith('# '):
-            print(f'  {BOLD}{CYAN}{line.lstrip()[2:]}{R}')
-        # Bullet points
-        elif line.lstrip().startswith('- ') or line.lstrip().startswith('* '):
-            indent = len(line) - len(line.lstrip())
-            pad = '  ' + ' ' * (indent // 2)
-            content = line.lstrip()[2:]
-            # Wrap long lines
-            wrapped = textwrap.fill(content, width=72, subsequent_indent=pad + '  ')
-            print(f'{pad}{GREEN}●{R} {wrapped}')
-        # Numbered lists
-        elif re.match(r'\s*\d+[\.\)]\s', line):
-            m = re.match(r'(\s*)(\d+[\.\)])\s*(.*)', line)
-            if m:
-                pad = '  ' + ' ' * (len(m.group(1)) // 2)
-                num = m.group(2)
-                content = m.group(3)
-                wrapped = textwrap.fill(content, width=72, subsequent_indent=pad + '   ')
-                print(f'{pad}{YELLOW}{num}{R} {wrapped}')
-        else:
-            wrapped = textwrap.fill(line, width=76, initial_indent='  ', subsequent_indent='  ')
-            print(wrapped)
+    n_tokens += 1
 
-    print(f'\n  {DIM}[{tokens} tokens | prefill {prompt_tps:.0f} tok/s | decode {tps:.1f} tok/s | GB10 CUDA]{R}')
+    # Skip <think> blocks
+    if '<think>' in tok:
+        in_think = True
+        continue
+    if '</think>' in tok:
+        in_think = False
+        continue
+    if in_think:
+        continue
 
-except Exception as e:
-    print(f'  Error: {e}')
+    line_buf += tok
+
+    # Render complete lines as they arrive
+    while '\n' in line_buf:
+        line, line_buf = line_buf.split('\n', 1)
+        render_line(line)
+        sys.stdout.flush()
+
+# Flush any remaining buffer
+if line_buf.strip():
+    render_line(line_buf)
+
+if n_tokens > 0 and not stop:
+    elapsed = time.time() - t0
+    tps = n_tokens / elapsed if elapsed > 0 else 0
+    print(f'\n  {DIM}[{n_tokens} tokens | {tps:.1f} tok/s | GB10 CUDA]{R}')
 "
     echo
 done
