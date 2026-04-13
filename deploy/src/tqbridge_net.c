@@ -102,7 +102,7 @@ tq_status tq_sender_send_kv(tq_sender *s,
     /* Encode wire header */
     uint8_t hdr_buf[TQ_HEADER_SIZE];
     tq_wire_header hdr_copy = *header;
-    hdr_copy.payload_bytes = k_size + v_size;
+    hdr_copy.payload_bytes = 4 + k_size + v_size;  /* 4-byte k_size prefix + K + V */
     tq_status st = tq_encode_header(&hdr_copy, hdr_buf);
     if (st != TQ_STATUS_OK) return st;
 
@@ -119,8 +119,12 @@ tq_status tq_sender_send_kv(tq_sender *s,
             }
         }
 
-        /* Send: header + K data + V data */
+        /* Send: header + k_size(u32) + K data + V data */
         st = send_all(s->fd, hdr_buf, TQ_HEADER_SIZE);
+        if (st == TQ_STATUS_OK) {
+            uint32_t k_size_le = (uint32_t)k_size;
+            st = send_all(s->fd, &k_size_le, 4);
+        }
         if (st == TQ_STATUS_OK) st = send_all(s->fd, k_data, k_size);
         if (st == TQ_STATUS_OK) st = send_all(s->fd, v_data, v_size);
 
@@ -195,7 +199,7 @@ tq_status tq_receiver_start(tq_receiver *r, tq_on_receive_fn callback, void *use
         return TQ_STATUS_DEVICE_ERROR;
     }
 
-    if (listen(fd, 4) < 0) {
+    if (listen(fd, 64) < 0) {
         close(fd);
         return TQ_STATUS_DEVICE_ERROR;
     }
@@ -203,7 +207,7 @@ tq_status tq_receiver_start(tq_receiver *r, tq_on_receive_fn callback, void *use
     r->fd = fd;
     r->running = 1;
 
-    /* Accept loop — runs in the calling thread (use pthread for background) */
+    /* Accept loop — single-threaded, persistent connections */
     while (r->running) {
         struct pollfd pfd = {.fd = fd, .events = POLLIN};
         int ret = poll(&pfd, 1, 1000); /* 1s timeout */
@@ -212,7 +216,14 @@ tq_status tq_receiver_start(tq_receiver *r, tq_on_receive_fn callback, void *use
         int client = accept(fd, NULL, NULL);
         if (client < 0) continue;
 
-        /* Handle client */
+        /* Set recv timeout — generous to handle slow batch cycles */
+        struct timeval tv = {30, 0};  /* 30 second timeout */
+        setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+        int one = 1;
+        setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+
+        /* Handle messages from this client */
         while (r->running) {
             uint8_t hdr_buf[TQ_HEADER_SIZE];
             if (recv_exact(client, hdr_buf, TQ_HEADER_SIZE) < 0) break;
@@ -221,7 +232,7 @@ tq_status tq_receiver_start(tq_receiver *r, tq_on_receive_fn callback, void *use
             tq_status st = tq_decode_header(hdr_buf, &header);
             if (st != TQ_STATUS_OK) break;
 
-            /* Read payload */
+            /* Read payload: first 4 bytes = k_size, then K data, then V data */
             uint8_t *payload = (uint8_t *)malloc(header.payload_bytes);
             if (!payload) break;
             if (recv_exact(client, payload, header.payload_bytes) < 0) {
@@ -229,10 +240,25 @@ tq_status tq_receiver_start(tq_receiver *r, tq_on_receive_fn callback, void *use
                 break;
             }
 
-            /* Split K and V (each half) */
-            size_t mid = header.payload_bytes / 2;
-            r->on_receive(&header, payload, mid, payload + mid,
-                          header.payload_bytes - mid, r->user_data);
+            /* Extract k_size prefix to correctly split K and V */
+            if (header.payload_bytes < 4) {
+                free(payload);
+                break;
+            }
+            uint32_t k_size = 0;
+            memcpy(&k_size, payload, 4);
+            uint8_t *k_data = payload + 4;
+            size_t v_size = header.payload_bytes - 4 - k_size;
+
+            if (k_size + 4 > header.payload_bytes) {
+                /* Fallback: old protocol without k_size prefix — split at midpoint */
+                size_t mid = header.payload_bytes / 2;
+                r->on_receive(&header, payload, mid, payload + mid,
+                              header.payload_bytes - mid, r->user_data);
+            } else {
+                r->on_receive(&header, k_data, k_size, k_data + k_size,
+                              v_size, r->user_data);
+            }
             free(payload);
         }
 

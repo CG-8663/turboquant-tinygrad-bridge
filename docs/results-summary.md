@@ -192,19 +192,75 @@ The Macs shift from eGPU hosts to orchestrators + Metal decode nodes. The RTX PR
 
 ## TriAttention + TurboQuant Stacking
 
-TriAttention (MIT/NVIDIA, April 2026) and TurboQuant are **complementary**:
+TriAttention (Weian Mao et al.) and TurboQuant are **complementary** but the combined ratio depends heavily on workload. Tom Turney's V3 paper provides the validated numbers:
 
-| Layer | Mechanism | Reduction | Combined |
-|-------|-----------|-----------|----------|
-| TriAttention | Token eviction (lossless) | 10.7x | |
-| TurboQuant | Value quantization (lossy) | 4.6x | |
-| **Stacked** | **Evict then compress** | | **~50x** |
+| Workload | TriAttention | TurboQuant | Combined | Status |
+|----------|-------------|-----------|----------|--------|
+| Standard 7B, 32K | 1.1x (90% retention) | 4.6x | **5.1x** | Validated, NIAH pass |
+| Hybrid 27B, 32K | 1.03x (97.5% retention) | 4.6x | **4.7x** | Validated (V3 hybrid policy) |
+| Reasoning 7B, 32K | ~5x (estimated) | 4.6x | **~23x** | Paper claim, not independently reproduced |
 
-With 50x KV compression, a 27B model at 131K context fits comfortably on 16GB nodes. This is the path to running long-context reasoning models across heterogeneous consumer hardware.
+**Important caveats (from Tom Turney's V3 review):**
+- The paper's 10.7x eviction ratio is on reasoning workloads with heavy thinking-token redundancy. Nobody has reproduced this on general text.
+- The validated safe operating point on wikitext is 90% retention (1.1x) with clean NIAH retrieval.
+- Paper-faithful TriAttention breaks needle-in-a-haystack at 90% retention (10% eviction) at end of context. Tom's V3 hybrid policy (prefix protection + per-segment quota) fixes this on standard transformers but still fails on hybrid mamba+attention models.
+- Always validate with NIAH at 32K with needles at start/middle/end before claiming any eviction ratio.
+
+With 5x combined compression on general text, a 27B model at 131K context reduces KV from 64GB to ~13GB — meaningful savings that enable multi-node distribution across consumer hardware.
+
+## Cluster Inference — Qualified Results (2026-04-13)
+
+All numbers measured on real hardware. No simulation. GPU utilization confirmed via nvidia-smi (GX10) and macmon (Macs).
+
+### Per-Node Maximum (Qwen3-8B Q8_0 unless noted)
+
+| Node | GPU | VRAM | Framework | Prefill | Decode | Model |
+|------|-----|------|-----------|---------|--------|-------|
+| GX10-001 | NVIDIA GB10 | 124 GB | llama.cpp CUDA | **2,030 tok/s** | **28.2 tok/s** | Qwen3-8B Q8_0 |
+| GX10-001 | NVIDIA GB10 | 124 GB | llama.cpp CUDA | **1,857 tok/s** | **55.6 tok/s** | Qwen3.5-35B MoE Q8_0 |
+| GX10-002 | NVIDIA GB10 | 122 GB | llama.cpp CUDA | **2,033 tok/s** | **28.4 tok/s** | Qwen3-8B Q8_0 |
+| M3 Ultra | Apple M3 Ultra | 96 GB | MLX Metal | 28 tok/s | **34.7 tok/s** | Qwen2.5-32B 4bit |
+| M3 Ultra | Apple M3 Ultra | 96 GB | MLX Metal | — | **94.3 tok/s** | Qwen2.5-7B 4bit |
+| M1 Max | Apple M1 Max | 32 GB | MLX Metal | 14 tok/s | **120.0 tok/s** | Qwen2.5-7B 4bit |
+| RTX PRO 6000 | Blackwell sm_120 | 96 GB | tinygrad CUDA (TB5) | — | **6.8 tok/s** | Qwen3-8B Q8_0 (tinygrad kernel + TB5 latency bottleneck) |
+
+### GPU Utilization Proof
+
+| Node | nvidia-smi / macmon | Peak Util | Temp Change | Power |
+|------|--------------------:|----------:|------------:|------:|
+| GX10-001 | nvidia-smi logged | **96%** | 53→63°C | 5.8→34.9W |
+| GX10-002 | nvidia-smi logged | **96%** | 59→67°C | 12.9→35.9W |
+| M3 Ultra | macmon visible | Metal active | — | — |
+| M1 Max | macmon visible | Metal active | — | — |
+| RTX PRO 6000 | tinygrad thermal | — | 57→59°C | — |
+
+### TQBridge Pipeline (sustained, 20s test)
+
+| Metric | Value | Proof |
+|--------|-------|-------|
+| Pipeline throughput | 5,630 tok/s | Client measured |
+| TurboQuant compression | 9.8x | C driver, bit-exact |
+| TriAttention eviction | 10% (90% retention) | Tom V3 validated |
+| GX10-001 decompressions | 880 | Server log |
+| GX10-002 decompressions | 880 | Server log |
+| M1 Max decompressions | 880 | Server log |
+| GX10 decompress time | 6.3ms/batch | Server log |
+| M1 Max decompress time | 11.3ms/batch | Server log |
+
+### Cluster Total Capacity
+
+| Resource | Value |
+|----------|-------|
+| Total GPU VRAM | 470 GB (124+122+96+96+32) |
+| Total decode capacity | ~190 tok/s combined (all nodes, different models) |
+| GX10 prefill capacity | ~4,000 tok/s (both nodes) |
+| Largest single-node model | Qwen3.5-35B MoE (34 GB, GX10-001) |
+| Largest cluster model | 405B feasible across all 5 nodes (470 GB) |
+| Central model storage | 18TB mirrored RAID on M1 Max |
 
 ## Software
 
 - **tqbridge**: Standalone Python package with C driver + CUDA/Metal kernels
 - **151 Python tests + 64 C assertions** passing on live hardware
-- **Wire protocol**: 40-byte TQKV header, CRC32, format negotiation
+- **Wire protocol**: 40-byte TQKV header + k_size prefix, CRC32, format negotiation
 - **C↔Python parity**: Bit-exact compressed bytes between implementations

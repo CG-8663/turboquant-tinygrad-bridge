@@ -1,6 +1,6 @@
 #!/bin/bash
 # GX10 decode node deployment script
-# Run on each GX10 node (192.168.68.60, .61)
+# Run on each GX10 node (192.168.68.61, .62)
 #
 # Prerequisites: Python 3.11+, CUDA toolkit, pip
 # Usage: bash gx10_setup.sh

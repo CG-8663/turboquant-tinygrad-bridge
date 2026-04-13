@@ -250,9 +250,10 @@ class CUDACompressor:
 
     def close(self):
         """Release GPU resources."""
-        self._gpu_rotation.clear()
-        self._gpu_codebook.clear()
-        self._gpu_boundaries.clear()
+        for attr in ("_gpu_rotation", "_gpu_codebook", "_gpu_boundaries"):
+            buf = getattr(self, attr, None)
+            if buf is not None:
+                buf.clear()
 
     def __del__(self):
         self.close()

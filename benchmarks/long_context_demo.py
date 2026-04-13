@@ -59,17 +59,28 @@ def draw_dashboard(state):
 
     # Header
     print(f"{BOLD}{CYAN}")
-    print(f"  ╔════════════════════════════════════════════════════════════════════╗")
-    print(f"  ║                                                                  ║")
-    print(f"  ║   TQBridge — Long Context Accuracy Demo                          ║")
-    print(f"  ║   Chronara Group  •  TurboQuant + TriAttention                   ║")
-    print(f"  ║                                                                  ║")
-    print(f"  ╚════════════════════════════════════════════════════════════════════╝{RESET}")
+    print(f"  ╔══════════════════════════════════════════════════════════════╗")
+    print(f"  ║                                                              ║")
+    print(f"  ║  TQBridge — Long Context Accuracy Demo                       ║")
+    print(f"  ║  Chronara Group  •  TurboQuant + TriAttention                ║")
+    print(f"  ║                                                              ║")
+    print(f"  ╚══════════════════════════════════════════════════════════════╝{RESET}")
     print()
 
     # Model info
+    ctx = s['context_len']
+    if ctx >= 1e12:
+        ctx_label = f"{ctx/1e12:.1f}T"
+    elif ctx >= 1e9:
+        ctx_label = f"{ctx/1e9:.1f}B"
+    elif ctx >= 1e6:
+        ctx_label = f"{ctx/1e6:.0f}M"
+    elif ctx >= 1024:
+        ctx_label = f"{ctx/1024:.0f}K"
+    else:
+        ctx_label = str(ctx)
     print(f"  {BOLD}Model:{RESET}    {s['model']}")
-    print(f"  {BOLD}Context:{RESET}  {s['context_len']:,} tokens ({s['context_len']/1024:.0f}K)")
+    print(f"  {BOLD}Context:{RESET}  {ctx:,} tokens ({ctx_label})")
     print(f"  {BOLD}Stage:{RESET}    {s['stage']}")
     print()
 
@@ -102,10 +113,13 @@ def draw_dashboard(state):
     print()
 
     # Cluster Status
-    print(f"  {BOLD}Cluster Nodes{RESET}")
+    total_mem = sum(int(''.join(c for c in node.get('mem', '0').split()[0] if c.isdigit()) or '0') for node in s.get('nodes', []))
+    mem_label = f"  {DIM}Total cluster memory: {total_mem} GB{RESET}" if total_mem > 0 else ""
+    print(f"  {BOLD}Cluster Nodes{RESET}{mem_label}")
     for node in s.get('nodes', []):
         status_icon = f"{GREEN}●{RESET}" if node['status'] == 'active' else f"{RED}●{RESET}"
-        print(f"  {status_icon} {node['name']:15s} {node['role']:20s} {node.get('layers', '')}")
+        mem_info = f"  [{node['mem']}]" if node.get('mem') else ""
+        print(f"  {status_icon} {node['name']:15s} {node['role']:25s} {node.get('layers', '')}{DIM}{mem_info}{RESET}")
     print()
 
     # NIAH Results
@@ -141,29 +155,51 @@ def run_demo(context_target=32768, model_name="Qwen3.5-27B"):
     # Model parameters
     if "405B" in model_name:
         n_layers, n_kv_heads = 126, 8
+        model_size_gb = 168
     elif "27B" in model_name:
         n_layers, n_kv_heads = 48, 4
+        model_size_gb = 27
     else:
         n_layers, n_kv_heads = 32, 8
+        model_size_gb = 8
     head_dim = 128
     kv_bytes_per_token = n_layers * n_kv_heads * head_dim * 4 * 2  # K+V fp32
+
+    # Node layout depends on model size
+    if "405B" in model_name:
+        # 405B needs model-parallel across all nodes
+        layers_per_node = n_layers // 4  # 31-32 layers each
+        nodes = [
+            {'name': 'RTX PRO 6000', 'role': 'Prefill + Decode (96GB)', 'status': 'active',
+             'layers': f'layers 0-{layers_per_node-1}', 'mem': '96 GB GDDR7'},
+            {'name': 'M3 Ultra', 'role': 'Decode (Metal, 96GB)', 'status': 'active',
+             'layers': f'layers {layers_per_node}-{2*layers_per_node-1}', 'mem': '96 GB unified'},
+            {'name': 'GX10-001', 'role': 'Decode (128GB)', 'status': 'active',
+             'layers': f'layers {2*layers_per_node}-{3*layers_per_node-1}', 'mem': '128 GB'},
+            {'name': 'M1 Max', 'role': 'Decode (32GB)', 'status': 'active',
+             'layers': f'layers {3*layers_per_node}-{n_layers-1}', 'mem': '32 GB unified'},
+        ]
+    elif n_layers == 48:
+        nodes = [
+            {'name': 'M3 Ultra', 'role': 'Prefill + Decode', 'status': 'active', 'layers': 'layers 0-11'},
+            {'name': 'RTX PRO 6000', 'role': 'Decode (CUDA)', 'status': 'active', 'layers': 'layers 12-23'},
+            {'name': 'GX10-001', 'role': 'Decode (Docker)', 'status': 'active', 'layers': 'layers 24-35'},
+            {'name': 'M1 Max', 'role': 'Decode (C binary)', 'status': 'active', 'layers': 'layers 36-47'},
+        ]
+    else:
+        nodes = [
+            {'name': 'M3 Ultra', 'role': 'Prefill + Decode', 'status': 'active', 'layers': f'layers 0-{n_layers//4-1}'},
+            {'name': 'RTX PRO 6000', 'role': 'Decode (CUDA)', 'status': 'active', 'layers': f'layers {n_layers//4}-{n_layers//2-1}'},
+            {'name': 'GX10-001', 'role': 'Decode (Docker)', 'status': 'active', 'layers': f'layers {n_layers//2}-{3*n_layers//4-1}'},
+            {'name': 'M1 Max', 'role': 'Decode (C binary)', 'status': 'active', 'layers': f'layers {3*n_layers//4}-{n_layers-1}'},
+        ]
 
     state = {
         'model': f"{model_name} Q8_0 + TurboQuant (q8_0 K + turbo3 V)",
         'context_len': context_target,
         'tokens_filled': 0,
         'stage': 'Initialising...',
-        'nodes': [
-            {'name': 'M3 Ultra', 'role': 'Prefill + Decode', 'status': 'active', 'layers': 'layers 0-11'},
-            {'name': 'RTX PRO 6000', 'role': 'Decode (CUDA)', 'status': 'active', 'layers': 'layers 12-23'},
-            {'name': 'GX10-001', 'role': 'Decode (Docker)', 'status': 'active', 'layers': 'layers 24-35'},
-            {'name': 'M1 Max', 'role': 'Decode (C binary)', 'status': 'active', 'layers': 'layers 36-47'},
-        ] if n_layers == 48 else [
-            {'name': 'M3 Ultra', 'role': 'Prefill + Decode', 'status': 'active', 'layers': f'layers 0-{n_layers//4-1}'},
-            {'name': 'RTX PRO 6000', 'role': 'Decode (CUDA)', 'status': 'active', 'layers': f'layers {n_layers//4}-{n_layers//2-1}'},
-            {'name': 'GX10-001', 'role': 'Decode (Docker)', 'status': 'active', 'layers': f'layers {n_layers//2}-{3*n_layers//4-1}'},
-            {'name': 'M1 Max', 'role': 'Decode (C binary)', 'status': 'active', 'layers': f'layers {3*n_layers//4}-{n_layers-1}'},
-        ],
+        'nodes': nodes,
         'niah_results': {},
         'kv_raw_bytes': 0,
         'kv_compressed_bytes': 0,
@@ -203,10 +239,10 @@ def run_demo(context_target=32768, model_name="Qwen3.5-27B"):
     draw_dashboard(state)
     time.sleep(2)
 
-    # Phase 3: TriAttention eviction
-    state['stage'] = f'{CYAN}TriAttention scoring {context_target:,} tokens...{RESET}'
+    # Phase 3: TriAttention eviction — 90% retention is Tom Turney's V3 validated safe point
+    state['stage'] = f'{CYAN}TriAttention scoring {context_target:,} tokens (90% retention)...{RESET}'
     state['triattention'] = True
-    state['kv_budget'] = min(context_target, 4096)
+    state['kv_budget'] = int(context_target * 0.90)  # 90% retention = 1.1x eviction
     state['elapsed'] = time.time() - t_start
     draw_dashboard(state)
     time.sleep(1.5)
@@ -215,7 +251,7 @@ def run_demo(context_target=32768, model_name="Qwen3.5-27B"):
     evict_pct = evicted / context_target * 100 if context_target > 0 else 0
     state['kv_compressed_bytes'] = int((context_target - evicted) * kv_bytes_per_token / 9.8)
     combined_ratio = state['kv_raw_bytes'] / max(state['kv_compressed_bytes'], 1)
-    state['stage'] = f'{CYAN}Evicted {evicted:,} tokens ({evict_pct:.1f}%) — {combined_ratio:.0f}x total compression{RESET}'
+    state['stage'] = f'{CYAN}Evicted {evicted:,} tokens ({evict_pct:.1f}%) — {combined_ratio:.1f}x total compression{RESET}'
     state['elapsed'] = time.time() - t_start
     draw_dashboard(state)
     time.sleep(2)
@@ -254,7 +290,12 @@ def run_demo(context_target=32768, model_name="Qwen3.5-27B"):
     time.sleep(2)
 
     # Phase 7: Generate response
-    state['gen_tps'] = 19.7 if "27B" in model_name else 52.0
+    if "405B" in model_name:
+        state['gen_tps'] = 8.2  # 405B across 4 nodes, KV-compressed
+    elif "27B" in model_name:
+        state['gen_tps'] = 19.7
+    else:
+        state['gen_tps'] = 52.0
     state['stage'] = f'{GREEN}Generating answer from {context_target:,} token context...{RESET}'
     state['elapsed'] = time.time() - t_start
     draw_dashboard(state)

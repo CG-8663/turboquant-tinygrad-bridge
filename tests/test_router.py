@@ -47,9 +47,9 @@ class TestNodeConfig:
     def test_create_tcp_node(self):
         node = NodeConfig(
             name="gx10", layers=range(16, 32), transport="tcp",
-            host="192.168.68.60", port=9473,
+            host="192.168.68.61", port=9473,
         )
-        assert node.host == "192.168.68.60"
+        assert node.host == "192.168.68.61"
         assert node.port == 9473
 
 
@@ -57,7 +57,7 @@ class TestRouterSetup:
     def test_add_nodes(self):
         router = KVRouter(head_dim=128, n_kv_heads=8)
         router.add_node("m3", layers=range(0, 16), transport="local", device="METAL")
-        router.add_node("gx10", layers=range(16, 32), transport="tcp", host="192.168.68.60")
+        router.add_node("gx10", layers=range(16, 32), transport="tcp", host="192.168.68.61")
 
         assert router.total_layers == 32
         assert router.layer_map["m3"] == range(0, 16)

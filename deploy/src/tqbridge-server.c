@@ -44,34 +44,56 @@ static void on_kv_received(const tq_wire_header *header,
     else if (header->fmt_v == TQ_FORMAT_TURBO4) bridge = g_bridge_turbo4;
 
     if (bridge) {
-        /* Decompress K */
-        tq_compressed k_comp = {
-            .data = (void *)k_data, .size = k_size,
-            .n_vectors = (size_t)(header->n_heads_k * header->seq_len * n_layers),
-            .head_dim = (uint16_t)head_dim,
-            .fmt = header->fmt_k,
-        };
+        /*
+         * Compute n_vectors from the compressed data size, NOT from header fields.
+         * The header's n_heads * seq_len * n_layers may claim more vectors than
+         * the compressed payload actually contains. Using the header blindly
+         * causes tq_decompress to read past the buffer → segfault.
+         *
+         * For turbo3: each vector = ceil(head_dim * 3 / 8) + 4 bytes (norm+idx)
+         * For turbo4: each vector = ceil(head_dim * 4 / 8) + 4 bytes
+         * Safe estimate: n_vectors = k_size / bytes_per_vector
+         */
+        int bits = (header->fmt_k == TQ_FORMAT_TURBO4) ? 4 :
+                   (header->fmt_k == TQ_FORMAT_TURBO3) ? 3 : 2;
+        size_t bytes_per_vec = (size_t)((head_dim * bits + 7) / 8) + 4;
 
-        size_t k_elements = k_comp.n_vectors * head_dim;
-        float *k_out = (float *)malloc(k_elements * sizeof(float));
-        if (k_out) {
-            tq_decompress(bridge, &k_comp, k_out);
-            free(k_out);
+        /* Decompress K */
+        size_t k_nvec = bytes_per_vec > 0 ? k_size / bytes_per_vec : 0;
+        if (k_nvec > 0 && k_size >= k_nvec * bytes_per_vec) {
+            tq_compressed k_comp = {
+                .data = (void *)k_data, .size = k_size,
+                .n_vectors = k_nvec,
+                .head_dim = (uint16_t)head_dim,
+                .fmt = header->fmt_k,
+            };
+            size_t k_elements = k_nvec * head_dim;
+            float *k_out = (float *)malloc(k_elements * sizeof(float));
+            if (k_out) {
+                tq_decompress(bridge, &k_comp, k_out);
+                free(k_out);
+            }
         }
 
         /* Decompress V */
-        tq_compressed v_comp = {
-            .data = (void *)v_data, .size = v_size,
-            .n_vectors = (size_t)(header->n_heads_v * header->seq_len * n_layers),
-            .head_dim = (uint16_t)head_dim,
-            .fmt = header->fmt_v,
-        };
+        bits = (header->fmt_v == TQ_FORMAT_TURBO4) ? 4 :
+               (header->fmt_v == TQ_FORMAT_TURBO3) ? 3 : 2;
+        bytes_per_vec = (size_t)((head_dim * bits + 7) / 8) + 4;
 
-        size_t v_elements = v_comp.n_vectors * head_dim;
-        float *v_out = (float *)malloc(v_elements * sizeof(float));
-        if (v_out) {
-            tq_decompress(bridge, &v_comp, v_out);
-            free(v_out);
+        size_t v_nvec = bytes_per_vec > 0 ? v_size / bytes_per_vec : 0;
+        if (v_nvec > 0 && v_size >= v_nvec * bytes_per_vec) {
+            tq_compressed v_comp = {
+                .data = (void *)v_data, .size = v_size,
+                .n_vectors = v_nvec,
+                .head_dim = (uint16_t)head_dim,
+                .fmt = header->fmt_v,
+            };
+            size_t v_elements = v_nvec * head_dim;
+            float *v_out = (float *)malloc(v_elements * sizeof(float));
+            if (v_out) {
+                tq_decompress(bridge, &v_comp, v_out);
+                free(v_out);
+            }
         }
     }
 
@@ -329,11 +351,15 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    /* Force line-buffered stdout so logs appear immediately in nohup/redirect */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
     printf("[tqbridge-server] Listening on port %d (head_dim=%d, seed=%d)\n", port, head_dim, seed);
     printf("[tqbridge-server] Ctrl+C to stop\n\n");
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
+    signal(SIGPIPE, SIG_IGN);  /* Ignore broken pipe — don't crash on client disconnect */
 
     g_start_time = now_sec();
 

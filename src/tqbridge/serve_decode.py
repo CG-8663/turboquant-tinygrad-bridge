@@ -6,7 +6,7 @@ decompresses using native C or CUDA kernels, and stores the KV cache
 in GPU memory ready for decode inference.
 
 Usage:
-    # On GX10-001 (192.168.68.60):
+    # On GX10-001 (192.168.68.61):
     python -m tqbridge.serve_decode --port 9473 --device NV
 
     # On M3 Ultra (local Metal):

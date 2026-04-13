@@ -108,9 +108,9 @@ def simulate_user(user: User, kv_bytes_per_token: int):
     # Compression
     user.kv_compressed = int(user.kv_raw / 9.8)  # TurboQuant
 
-    # TriAttention eviction
-    budget = 4096
-    if user.context_len > budget:
+    # TriAttention eviction — 90% retention (Tom Turney V3 validated safe point)
+    budget = int(user.context_len * 0.90)
+    if budget < user.context_len:
         evicted_ratio = 1.0 - (budget / user.context_len)
         user.kv_compressed = int(budget * kv_bytes_per_token / 9.8)
 
@@ -234,7 +234,7 @@ def draw_dashboard(users, start_time, total_target_tokens):
 
     print()
     print(f"  {DIM}{'─'*65}{RESET}")
-    print(f"  {DIM}Showing 15 most recent users • TriAttention budget=4096 • Asymmetric q8_0 K + turbo3 V{RESET}")
+    print(f"  {DIM}Showing 15 most recent users • TriAttention 90% retention (V3) • Asymmetric q8_0 K + turbo3 V{RESET}")
 
 
 def run_stress_test(n_users=50, max_duration=90):

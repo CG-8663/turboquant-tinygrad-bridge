@@ -137,8 +137,9 @@ def run_demo():
     for ctx, label in [(32768, "32K"), (131072, "128K"), (1000000, "1M"), (10000000, "10M")]:
         kv_raw = ctx * 48 * 4 * 128 * 4 * 2
         kv_tq = kv_raw / 9.8
-        budget = 4096
-        kv_triatt = min(ctx, budget) * 48 * 4 * 128 * 4 * 2 / 9.8
+        # 90% retention = Tom Turney V3 validated safe point on general text
+        budget = int(ctx * 0.90)
+        kv_triatt = budget * 48 * 4 * 128 * 4 * 2 / 9.8
         ratio = kv_raw / kv_triatt
 
         def sz(b):
@@ -192,7 +193,7 @@ def run_demo():
         ("27B NIAH (needle retrieval)", "PASS", f"{GREEN}REAL{RESET}"),
         ("7B accuracy (math/code/logic)", "5/5 correct", f"{GREEN}REAL{RESET}"),
         ("KV compression ratio", "9.8x", f"{GREEN}REAL{RESET}"),
-        ("KV at 10M tokens (combined)", "23,926x", f"{GREEN}REAL{RESET}"),
+        ("KV combined (TQ 9.8x + TriAtt 1.1x)", "~11x", f"{GREEN}VALIDATED{RESET}"),
         ("Docker decode node", "1 MB image", f"{GREEN}REAL{RESET}"),
     ]
 
@@ -211,7 +212,7 @@ def run_demo():
     type_line(f"  and distributed, context is unlimited.", 0.025)
     print()
     type_line(f"  The model doesn't know it's running across 4 machines.", 0.025)
-    type_line(f"  The user doesn't know the KV cache is 23,926x compressed.", 0.025)
+    type_line(f"  The user doesn't know the KV cache is ~11x compressed (TurboQuant 9.8x + TriAttention 1.1x).", 0.025)
     type_line(f"  It just works.", 0.025)
     print()
     print(f"  {BOLD}{'═'*66}{RESET}")

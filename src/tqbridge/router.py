@@ -11,7 +11,7 @@ Supports two transport modes:
 Usage:
     router = KVRouter(head_dim=128, seed=42)
     router.add_node("m3", device="METAL", layers=range(0, 16), transport="local")
-    router.add_node("gx10", host="192.168.68.60", layers=range(16, 32), transport="tcp")
+    router.add_node("gx10", host="192.168.68.61", layers=range(16, 32), transport="tcp")
     router.warmup()
 
     # Fan out KV from prefill

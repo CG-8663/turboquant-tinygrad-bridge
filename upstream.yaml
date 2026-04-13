@@ -1,0 +1,73 @@
+# TQBridge Upstream Dependency Tracking
+# Run: python tools/check_upstream.py
+
+dependencies:
+  tinygrad:
+    submodule: tinygrad
+    remote: https://github.com/tinygrad/tinygrad.git
+    track_branch: master
+    watch_paths:
+      - tinygrad/runtime/ops_nv.py        # NV backend changes
+      - tinygrad/runtime/ops_metal.py      # Metal backend changes
+      - tinygrad/runtime/autogen/nv_*.py   # NV autogen (RM control, thermal)
+      - tinygrad/codegen/                  # Kernel compilation
+      - tinygrad/device.py                 # Device detection
+    impact: GPU kernel dispatch, eGPU thermal reads, buffer management
+    notes: >
+      tinygrad is NOT thread-safe (SQLite disk cache + ALLOW_DEVICE_USAGE).
+      Any changes to device init or caching affect our router.py sequential fallback.
+
+  turboquant_plus:
+    submodule: turboquant_plus
+    remote: https://github.com/TheTom/turboquant_plus
+    track_branch: feature/turboquant-kv-cache
+    watch_paths:
+      - ggml/src/ggml-turbo-quant.c        # Core quantize/dequantize
+      - ggml/include/ggml.h                # GGML_TYPE_TURBO* enums
+      - ggml/src/ggml-common.h             # block_turbo*_0 structs
+      - src/llama-kv-cache.cpp             # KV cache allocation
+      - src/llama-graph.cpp                # Graph-side WHT rotation
+    impact: Compression algorithm, block format, rotation matrices
+    notes: >
+      Our C driver (tqbridge.c) must stay bit-exact with TurboQuant+ compress/decompress.
+      Any block struct change breaks wire protocol compatibility.
+      Asymmetric K/V (Q8_0 K + turbo V) is critical — symmetric kills 27B+ quality.
+
+  llama_cpp_turboquant:
+    submodule: llama-cpp-turboquant
+    remote: https://github.com/TheTom/llama-cpp-turboquant
+    track_branch: main
+    watch_paths:
+      - src/tqbridge.c                     # C compression core
+      - src/tqbridge.h                     # Public API
+      - src/tqbridge_net.c                 # TCP transport
+      - tools/tqbridge-server.c            # Decode server binary
+    impact: C driver, wire protocol, decode server
+    notes: >
+      This is our own C code. Changes here are coordinated, not upstream-driven.
+
+  triattention:
+    pip_package: triattention
+    remote: https://github.com/weianmao/triattention
+    track_branch: main
+    watch_paths:
+      - triattention/                      # Core eviction logic
+    impact: Token eviction before compression (~5x stacked on general text, up to ~23x on reasoning)
+    notes: >
+      Weian Mao et al. TriAttention. Complementary to TurboQuant — evict then compress.
+      Validated safe point: 90% retention (1.1x) on general text with clean NIAH.
+      Paper's 10x claim is reasoning-only with think-token redundancy — not reproduced on general text.
+      Tom Turney V3 hybrid policy needed for NIAH pass. Not yet a hard dependency.
+
+  llama_cpp_upstream:
+    remote: https://github.com/ggml-org/llama.cpp
+    track_branch: master
+    watch_paths:
+      - ggml/include/ggml.h                # ggml_type enum (new quant types)
+      - ggml/src/ggml.c                    # Type traits
+      - src/llama-kv-cache.cpp             # KV cache changes
+      - src/llama-graph.cpp                # Graph builder
+    impact: Upstream PR target — must stay compatible for Phase 1 submission
+    notes: >
+      Tom's upstream PR plan in turboquant_plus/docs/upstream-pr-plan.md.
+      Phase 0 (community consensus) is BLOCKING before any code PR.

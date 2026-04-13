@@ -16,7 +16,7 @@ Usage:
 
     server = GenerativeServer(
         model_path="mlx-community/Qwen2.5-7B-Instruct-4bit",
-        nodes=["192.168.68.60:9473", "192.168.68.61:9473"],
+        nodes=["192.168.68.61:9473", "192.168.68.62:9473"],
         kv_budget=2048,
     )
     server.start()

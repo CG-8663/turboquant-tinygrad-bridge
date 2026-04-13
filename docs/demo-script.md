@@ -14,11 +14,11 @@ Voice-over script for each screenshot. Keep it conversational, confident, and fo
 
 Without TQBridge, the KV cache for this context would be nearly 2 terabytes. No machine on earth holds that in GPU memory.
 
-With TurboQuant compression and TriAttention token eviction, it's 82 megabytes. That's a 24,000x reduction — and it fits on a phone.
+With TurboQuant compression (9.8x asymmetric) and TriAttention at 90% retention (1.1x), combined ~5x on general text. That 2TB becomes ~400 gigabytes compressed.
 
-The needle-in-a-haystack test passes at every position. We hid a secret code deep in those 10 million tokens, and the model found it perfectly. No accuracy loss.
+On reasoning workloads with heavy think-token redundancy, TriAttention can evict more aggressively — up to ~23x combined — but this is workload-dependent and must be validated with NIAH before claiming.
 
-The key insight: the KV cache stays at 82 megabytes regardless of how long the context gets. One thousand tokens or ten million — same memory footprint."
+The needle-in-a-haystack test passes with Tom Turney's V3 hybrid policy at 90% retention. Beyond that, retrieval accuracy degrades — honest about the limits."
 
 ---
 
@@ -48,7 +48,7 @@ Zero failures. That's the important number. Zero."
 
 The model works through it step by step. Sets up similar triangles, derives the relationship, solves for r. Correct answer.
 
-This is running through compressed KV cache — 9.8x TurboQuant compression with TriAttention eviction active. Same answer you'd get without compression. The compression is lossless for reasoning quality."
+This is running through compressed KV cache — 9.8x TurboQuant asymmetric compression (Q8_0 keys + turbo3 values). Within 1.5% of uncompressed quality on 27B at 32K context. Not lossless — but close enough that output quality is preserved."
 
 ---
 
@@ -62,7 +62,7 @@ This is running through compressed KV cache — 9.8x TurboQuant compression with
 
 The model generates a complete, working Python function. Sorts by start time, iterates with overlap detection, builds the merged list. Correct solution with documentation.
 
-At 125 tokens per second through compressed KV. The point isn't that the model can code — any 7B model can do this. The point is that compressing the KV cache by 10x doesn't break it. The output is identical to uncompressed inference."
+At 125 tokens per second through compressed KV. The point isn't that the model can code — any 7B model can do this. The point is that compressing the KV cache by 9.8x doesn't break it. Within 1.5% of baseline quality."
 
 ---
 
@@ -78,7 +78,7 @@ At 125 tokens per second through compressed KV. The point isn't that the model c
 
 Here's what this means in practice: you can run a 27-billion parameter model at 128K context across four machines that individually can't hold it. The KV cache compresses and distributes automatically. Every node contributes to decode. The bridge adds 2 milliseconds of overhead — invisible to the user.
 
-TQBridge isn't a different model. It's the same model, same weights, same quality — just running on hardware that shouldn't be able to run it. That's what 24,000x KV compression enables."
+TQBridge isn't a different model. It's the same model, same weights — running across hardware that individually can't hold it. TurboQuant gives 9.8x KV compression with 1.5% quality cost. TriAttention adds 1.1x on general text (more on reasoning). The real value is distributing inference across whatever GPUs you have."
 
 ---
 
@@ -90,6 +90,6 @@ docker run chronaragroup/chronara-bridge
 
 One command. Your machine joins the mesh.
 
-Built on TurboQuant by Google Research, TurboQuant Plus by Tom Turney, TriAttention by MIT and NVIDIA, and tinygrad by George Hotz. We're the transport layer that connects them across machines.
+Built on TurboQuant by Google Research, TurboQuant Plus by Tom Turney, TriAttention by Weian Mao et al., and tinygrad by George Hotz. We're the transport layer that connects them across machines.
 
 Links in the description."

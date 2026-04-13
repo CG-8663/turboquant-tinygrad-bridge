@@ -12,7 +12,7 @@ Tasks:
   4. Reasoning chain (logic puzzle)
   5. Creative writing with constraints
 
-Shows that compressed KV (23,926x) doesn't degrade output quality.
+Shows that compressed KV (~11x) doesn't degrade output quality.
 
 Usage:
     python benchmarks/accuracy_showcase.py
@@ -231,7 +231,7 @@ def run_showcase():
     print(f"  {BOLD}Total tokens: {total_tokens:,}{RESET}")
     print(f"  {BOLD}Compression:  9.8x TurboQuant + TriAttention eviction{RESET}")
     print()
-    print(f"  {CYAN}All responses generated through compressed KV cache (23,926x at 10M context).{RESET}")
+    print(f"  {CYAN}All responses generated through compressed KV cache (~11x at 10M context).{RESET}")
     print(f"  {CYAN}Same model, same weights — TQBridge adds compression, not degradation.{RESET}")
     print(f"  {BOLD}{'═' * 66}{RESET}")
     print()
