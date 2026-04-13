@@ -10,18 +10,18 @@ DIM="\033[2m"
 GREEN="\033[92m"
 CYAN="\033[96m"
 YELLOW="\033[93m"
+WHITE="\033[97m"
 RESET="\033[0m"
 
 echo -e "\n${BOLD}${CYAN}╔══════════════════════════════════════════════════╗${RESET}"
 echo -e "${BOLD}${CYAN}║  Hyvia — UK Planning Approval Advisor            ║${RESET}"
 echo -e "${BOLD}${CYAN}║  Chronara Cluster (GX10 GB10 CUDA)               ║${RESET}"
 echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════════╝${RESET}"
-echo -e "\n${DIM}  Type a planning question. Say 'continue' for more detail.${RESET}"
-echo -e "${DIM}  Ctrl+C to exit. 'new' to start a fresh conversation.${RESET}\n"
+echo -e "\n${DIM}  Type a planning question. 'continue' for more. 'new' to reset.${RESET}"
+echo -e "${DIM}  Ctrl+C to exit.${RESET}\n"
 
-SYSTEM="You are Hyvia, a UK planning approval advisor. Provide: 1) Approval probability 2) Risk factors 3) Recommendations. Be specific about policies, cite paragraph numbers and legislation names. Respond directly, no internal reasoning. Format with markdown headers and bullet points."
+SYSTEM="You are Hyvia, a UK planning approval advisor. Answer directly. Never use <think> tags. Provide: 1) Approval probability if applicable 2) Key risk factors 3) Recommendations. Cite specific policies, paragraph numbers, and legislation. Format with markdown."
 
-# Conversation history — keeps context for follow-ups
 HISTORY=""
 
 while true; do
@@ -29,29 +29,30 @@ while true; do
     read -r PROMPT
     [ -z "$PROMPT" ] && continue
 
-    # Reset conversation
     if [ "$PROMPT" = "new" ] || [ "$PROMPT" = "reset" ]; then
         HISTORY=""
         echo -e "\n${DIM}  Conversation reset.${RESET}\n"
         continue
     fi
 
-    # Build prompt with history
     HISTORY="${HISTORY}<|im_start|>user\n${PROMPT}<|im_end|>\n"
-    FULL_PROMPT="<|im_start|>system\n${SYSTEM}<|im_end|>\n${HISTORY}<|im_start|>assistant\n"
+    # Seed the assistant response to prevent <think> mode
+    FULL_PROMPT="<|im_start|>system\n${SYSTEM}<|im_end|>\n${HISTORY}<|im_start|>assistant\nHere is my analysis:\n"
 
-    echo -e "\n${CYAN}  Hyvia:${RESET}\n"
+    echo -e "\n${CYAN}  Hyvia:${RESET}"
 
-    # Stream + render markdown
-    RESPONSE_TEXT=$(curl -sN "http://${HOST}:${PORT}/completion" \
+    # Stream tokens and render markdown line-by-line
+    RESP_FILE=$(mktemp /tmp/hyvia_resp.XXXXXX)
+
+    curl -sN "http://${HOST}:${PORT}/completion" \
         -H "Content-Type: application/json" \
         -d "{
             \"prompt\": \"${FULL_PROMPT}\",
-            \"max_tokens\": 600,
+            \"max_tokens\": 2000,
             \"temperature\": 0.7,
             \"stream\": true,
             \"stop\": [\"<|im_end|>\", \"<|im_start|>\"]
-        }" 2>/dev/null | python3 -c "
+        }" 2>/dev/null | python3 -uc "
 import json, re, sys, time
 
 BOLD = '\033[1m'
@@ -62,101 +63,90 @@ YELLOW = '\033[93m'
 WHITE = '\033[97m'
 R = '\033[0m'
 
-def fmt_bold(text):
-    return re.sub(r'\*\*(.+?)\*\*', BOLD + WHITE + r'\1' + R, text)
-
-def render_line(line):
+def fmt(line):
+    \"\"\"Render one line with markdown formatting.\"\"\"
     if not line.rstrip():
-        print()
+        print(flush=True)
         return
-    line = fmt_bold(line.rstrip())
-    stripped = line.lstrip()
-    indent_n = len(line) - len(line.lstrip())
-    pad = '  '
+    # Bold **text**
+    line = re.sub(r'\*\*(.+?)\*\*', BOLD + WHITE + r'\g<1>' + R, line.rstrip())
+    raw = re.sub(r'\033\[[^m]*m', '', line)  # strip ansi for pattern matching
+    stripped = raw.lstrip()
 
     if stripped.startswith('### '):
-        # strip the ansi from the header detection
-        raw = re.sub(r'\033\[[^m]*m', '', stripped)
-        if raw.startswith('### '):
-            print(f'{pad}{BOLD}{CYAN}{stripped[4:]}{R}')
+        print(f'  {BOLD}{CYAN}{line.lstrip()[4:]}{R}', flush=True)
     elif stripped.startswith('## '):
-        raw = re.sub(r'\033\[[^m]*m', '', stripped)
-        if raw.startswith('## '):
-            print(f'{pad}{BOLD}{CYAN}{stripped[3:]}{R}')
+        print(f'  {BOLD}{CYAN}{line.lstrip()[3:]}{R}', flush=True)
+    elif stripped.startswith('# '):
+        print(f'  {BOLD}{CYAN}{line.lstrip()[2:]}{R}', flush=True)
     elif stripped.startswith('- ') or stripped.startswith('* '):
-        content = stripped[2:]
-        print(f'{pad}{GREEN}●{R} {content}')
-    elif re.match(r'\d+[\.\)]\s', re.sub(r'\033\[[^m]*m', '', stripped)):
-        raw = re.sub(r'\033\[[^m]*m', '', stripped)
-        m = re.match(r'(\d+[\.\)])\s*(.*)', raw)
+        print(f'  {GREEN}●{R} {line.lstrip()[2:]}', flush=True)
+    elif re.match(r'\d+[\.\)]\s', stripped):
+        m = re.match(r'(\d+[\.\)])\s*(.*)', stripped)
         if m:
-            # Re-apply bold formatting to the content part
-            content = stripped[len(m.group(1))+1:].lstrip()
-            print(f'{pad}{YELLOW}{m.group(1)}{R} {content}')
+            print(f'  {YELLOW}{m.group(1)}{R} {line.lstrip()[len(m.group(1))+1:].lstrip()}', flush=True)
     else:
-        print(f'{pad}{line.lstrip()}')
+        print(f'  {line.lstrip()}', flush=True)
 
 t0 = time.time()
-n_tokens = 0
+n = 0
 in_think = False
-line_buf = ''
-full_text = ''
+buf = ''
+full = ''
+tps_final = 0
+pp_final = 0
+n_final = 0
 
-for raw_line in sys.stdin:
-    raw_line = raw_line.strip()
-    if raw_line.startswith('data: '): raw_line = raw_line[6:]
-    if not raw_line or raw_line == '[DONE]': continue
-
+for raw in sys.stdin:
+    raw = raw.strip()
+    if raw.startswith('data: '): raw = raw[6:]
+    if not raw or raw == '[DONE]': continue
     try:
-        d = json.loads(raw_line)
-        tok = d.get('content', '')
-        stop = d.get('stop', False)
+        d = json.loads(raw)
     except:
         continue
 
+    tok = d.get('content', '')
+    stop = d.get('stop', False)
+
     if stop:
-        if line_buf.strip():
-            render_line(line_buf)
-        tps = d.get('timings', {}).get('predicted_per_second', 0)
-        pp = d.get('timings', {}).get('prompt_per_second', 0)
-        n_tok = d.get('tokens_predicted', n_tokens)
-        print(f'\n{pad}{DIM}[{n_tok} tokens | prefill {pp:.0f} tok/s | decode {tps:.1f} tok/s | GB10 CUDA]{R}')
-        # Output full text for history capture (to stderr)
-        print(full_text, file=sys.stderr, end='')
+        if buf.strip(): fmt(buf)
+        tps_final = d.get('timings', {}).get('predicted_per_second', 0)
+        pp_final = d.get('timings', {}).get('prompt_per_second', 0)
+        n_final = d.get('tokens_predicted', n)
         break
 
-    n_tokens += 1
+    # Skip think blocks
+    if '<think>' in tok: in_think = True; continue
+    if '</think>' in tok: in_think = False; continue
+    if in_think: continue
 
-    if '<think>' in tok:
-        in_think = True
-        continue
-    if '</think>' in tok:
-        in_think = False
-        continue
-    if in_think:
-        continue
+    n += 1
+    buf += tok
+    full += tok
 
-    line_buf += tok
-    full_text += tok
+    # Render complete lines immediately
+    while '\n' in buf:
+        line, buf = buf.split('\n', 1)
+        fmt(line)
 
-    while '\n' in line_buf:
-        line, line_buf = line_buf.split('\n', 1)
-        render_line(line)
-        sys.stdout.flush()
+# Flush remaining
+if buf.strip(): fmt(buf)
 
-if line_buf.strip():
-    render_line(line_buf)
+# Footer
+if n_final > 0 or n > 0:
+    tokens = n_final if n_final else n
+    print(f'\n  {DIM}[{tokens} tokens | prefill {pp_final:.0f} tok/s | decode {tps_final:.1f} tok/s | GB10 CUDA]{R}', flush=True)
 
-if n_tokens > 0 and not stop:
-    elapsed = time.time() - t0
-    tps = n_tokens / elapsed if elapsed > 0 else 0
-    print(f'\n  {DIM}[{n_tokens} tokens | {tps:.1f} tok/s | GB10 CUDA]{R}')
-    print(full_text, file=sys.stderr, end='')
-" 2>/tmp/hyvia_last_response.txt)
+# Save full text for conversation history
+with open('$RESP_FILE', 'w') as f:
+    f.write(full)
+"
 
-    # Append assistant response to history for follow-ups
-    LAST_RESPONSE=$(cat /tmp/hyvia_last_response.txt 2>/dev/null)
-    HISTORY="${HISTORY}<|im_start|>assistant\n${LAST_RESPONSE}<|im_end|>\n"
+    # Append to conversation history
+    LAST=$(cat "$RESP_FILE" 2>/dev/null)
+    HISTORY="${HISTORY}<|im_start|>assistant\nHere is my analysis:\n${LAST}<|im_end|>\n"
+    rm -f "$RESP_FILE"
 
     echo
 done
