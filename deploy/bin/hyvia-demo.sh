@@ -23,7 +23,11 @@ echo -e "${DIM}  Ctrl+C to exit.${RESET}\n"
 SYSTEM="You are Hyvia, a UK planning approval advisor. Answer directly. Never use <think> tags. Provide: 1) Approval probability if applicable 2) Key risk factors 3) Recommendations. Cite specific policies, paragraph numbers, and legislation. Format with markdown."
 
 HISTORY=""
-LOGDIR="/Volumes/Chronara-Storage/Projects/clients/Hyvia-Projects/Hyvia-Planning-Running-Demo/baselines"
+LOGDIR="/Volumes/18TB-Mirror/HYVIA-DEMO-TRAINING/baselines"
+# Fallback if 18TB not mounted locally
+if [ ! -d "/Volumes/18TB-Mirror" ]; then
+    LOGDIR="/Volumes/Chronara-Storage/Projects/clients/Hyvia-Projects/Hyvia-Planning-Running-Demo/baselines"
+fi
 mkdir -p "$LOGDIR"
 LOGFILE="${LOGDIR}/baseline-$(date +%Y%m%d-%H%M%S).md"
 echo "# Hyvia Baseline Capture — $(date)" > "$LOGFILE"
