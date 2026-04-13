@@ -25,6 +25,8 @@ while true; do
     [ -z "$PROMPT" ] && continue
 
     echo -e "\n${CYAN}  Hyvia:${RESET} \c"
+    T0=$(python3 -c "import time; print(time.time())")
+    TCOUNT=0
 
     # Stream response — tokens appear as generated
     curl -sN "http://${HOST}:${PORT}/completion" \
@@ -55,7 +57,13 @@ except:
     pass
 " 2>/dev/null)
         printf "%s" "$TOKEN"
+        # Count tokens for footer
+        TCOUNT=$((TCOUNT + 1))
     done
 
-    echo -e "\n"
+    # Show tok/s footer
+    T1=$(python3 -c "import time; print(time.time())")
+    ELAPSED=$(python3 -c "print(${T1} - ${T0})" 2>/dev/null)
+    TPS=$(python3 -c "print(f'{${TCOUNT}/${ELAPSED}:.1f}' if ${ELAPSED} > 0 else '?')" 2>/dev/null)
+    echo -e "\n  ${DIM}[${TCOUNT} tokens, ${TPS} tok/s on GB10 CUDA]${RESET}\n"
 done

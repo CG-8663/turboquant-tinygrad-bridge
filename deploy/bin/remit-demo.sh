@@ -25,6 +25,8 @@ while true; do
     [ -z "$PROMPT" ] && continue
 
     echo -e "\n${CYAN}  Agent:${RESET} \c"
+    T0=$(python3 -c "import time; print(time.time())")
+    TCOUNT=0
 
     curl -sN "http://${HOST}:${PORT}/completion" \
         -H "Content-Type: application/json" \
@@ -52,7 +54,11 @@ except:
     pass
 " 2>/dev/null)
         printf "%s" "$TOKEN"
+        TCOUNT=$((TCOUNT + 1))
     done
 
-    echo -e "\n"
+    T1=$(python3 -c "import time; print(time.time())")
+    ELAPSED=$(python3 -c "print(${T1} - ${T0})" 2>/dev/null)
+    TPS=$(python3 -c "print(f'{${TCOUNT}/${ELAPSED}:.1f}' if ${ELAPSED} > 0 else '?')" 2>/dev/null)
+    echo -e "\n  ${DIM}[${TCOUNT} tokens, ${TPS} tok/s on GB10 CUDA]${RESET}\n"
 done
