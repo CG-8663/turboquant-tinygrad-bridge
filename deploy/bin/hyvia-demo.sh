@@ -23,6 +23,13 @@ echo -e "${DIM}  Ctrl+C to exit.${RESET}\n"
 SYSTEM="You are Hyvia, a UK planning approval advisor. Answer directly. Never use <think> tags. Provide: 1) Approval probability if applicable 2) Key risk factors 3) Recommendations. Cite specific policies, paragraph numbers, and legislation. Format with markdown."
 
 HISTORY=""
+LOGDIR="/Volumes/Chronara-Storage/Projects/clients/Hyvia-Projects/Hyvia-Planning-Running-Demo/baselines"
+mkdir -p "$LOGDIR"
+LOGFILE="${LOGDIR}/baseline-$(date +%Y%m%d-%H%M%S).md"
+echo "# Hyvia Baseline Capture — $(date)" > "$LOGFILE"
+echo "Model: Qwen3-8B Q8_0 | Node: GX10-001 GB10 CUDA" >> "$LOGFILE"
+echo "" >> "$LOGFILE"
+echo -e "${DIM}  Logging to: ${LOGFILE}${RESET}\n"
 
 while true; do
     printf "${GREEN}  You: ${RESET}"
@@ -146,7 +153,15 @@ with open('$RESP_FILE', 'w') as f:
     # Append to conversation history
     LAST=$(cat "$RESP_FILE" 2>/dev/null)
     HISTORY="${HISTORY}<|im_start|>assistant\nHere is my analysis:\n${LAST}<|im_end|>\n"
-    rm -f "$RESP_FILE"
 
+    # Log Q&A to baseline file
+    echo "## Q: ${PROMPT}" >> "$LOGFILE"
+    echo "" >> "$LOGFILE"
+    echo "${LAST}" >> "$LOGFILE"
+    echo "" >> "$LOGFILE"
+    echo "---" >> "$LOGFILE"
+    echo "" >> "$LOGFILE"
+
+    rm -f "$RESP_FILE"
     echo
 done
