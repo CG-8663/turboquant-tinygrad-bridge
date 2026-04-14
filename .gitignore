@@ -1,4 +1,5 @@
-# BMAD internal config
+# BMAD internal config (symlink + output)
+_bmad
 _bmad/
 _bmad-output/
 .claude/
@@ -22,3 +23,48 @@ build/
 .venv/
 venv/
 .opencode/
+
+# Private operational harness — lives in the chronara-mesh-operation-live repo
+# (never commit these to the public bridge repo)
+project-context.md
+CLAUDE.md
+conftest.py
+
+# Private: router + cluster control + adapters + demos
+deploy/bin/tqbridge
+deploy/bin/tqbridge-cluster
+deploy/bin/tqbridge-router
+deploy/bin/tqbridge-mlx-server
+deploy/bin/tqbridge-tinygrad-server
+deploy/bin/install-lifecycle.sh
+deploy/bin/setup-chronara-user.sh
+deploy/bin/hyvia-router-demo.py
+deploy/bin/hyvia-demo.py
+deploy/bin/hyvia-demo.sh
+deploy/bin/remit-demo.sh
+deploy/bin/nodes.yaml
+deploy/bin/llmfit
+deploy/bin/tqbridge-menu
+deploy/bin/tqbridge-monitor
+deploy/cluster.yaml
+deploy/observability.docker-compose.yml
+deploy/grafana/
+deploy/prometheus/
+deploy/systemd/
+deploy/launchd/
+
+# Private: router-specific tests (bridge tests are public)
+tests/conftest.py
+tests/README.md
+tests/unit/test_router_primitives.py
+tests/integration/test_router_endpoints.py
+tests/nfr/
+tests/fixtures/
+tests/unit/__init__.py
+tests/integration/__init__.py
+
+# Secrets — defence in depth
+**/tokens.env
+**/secrets.*
+*.pem
+*.key
